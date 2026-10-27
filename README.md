@@ -73,7 +73,7 @@ npm start
 自带两个形象，在菜单里切换：
 
 - **探头**：来自 [MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)。按原仓库 `PROVENANCE.md` 的说明，图片素材不在 MIT 许可范围内，只是原样提供。
-- **笑脸**：由一张鲸鱼娘二创图抠图、裁剪而来。
+- **笑脸**：由一张鲸鱼娘二创图抠图、裁剪而来，程序图标也用它。
 
 如果你是权利人并希望移除，请开 issue。菜单里「用自己的图片…」可以换成任意图片（建议正方形、透明背景的 PNG，右侧和下方裁掉的「探头」构图效果最好）。
 
@@ -109,4 +109,4 @@ Two characters come with the app, switched in the menu: 探头 from [MeteorNOX/D
 
 ## License
 
-The code is MIT licensed, see [LICENSE](LICENSE). The images in `skins/` and `build/icon.png` are not covered by it.
+The code is MIT licensed, see [LICENSE](LICENSE). The images in `skins/` and `assets/` are not covered by it.

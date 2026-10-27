@@ -22,13 +22,14 @@
     "files": [
       "src/**/*",
       "skins/**/*",
+      "assets/**/*",
       "package.json"
     ],
     "win": {
       "target": [
         "portable"
       ],
-      "icon": "build/icon.png"
+      "icon": "assets/icon-smile.ico"
     },
     "portable": {
       "artifactName": "WhaleUsage-v${version}-portable.exe"

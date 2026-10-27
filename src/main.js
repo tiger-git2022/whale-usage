@@ -184,8 +184,15 @@ function sendConfig() {
   win.webContents.send('config', { skinUrl: pathToFileURL(skinPath()).href, sound: settings.sound })
 }
 
+// Each character has an icon file with every size Windows asks for (16 to 256 px); the small ones show
+// only the face, so the tray picks the size for the display scale instead of shrinking a big picture.
+// The exe's own icon is icon-smile.ico (package.json); a custom picture uses that one too.
+const iconFile = id => path.join(__dirname, '..', 'assets', `icon-${id}.ico`)
+const APP_ICON = iconFile('smile')
+
 function trayIcon() {
-  return nativeImage.createFromPath(skinPath()).resize({ width: 16, height: 16, quality: 'best' })
+  const file = iconFile(settings.skin)
+  return nativeImage.createFromPath(fs.existsSync(file) ? file : APP_ICON)
 }
 
 // The tray tooltip follows a running update; the menu itself is built each time it opens.
@@ -281,7 +288,6 @@ function setScale(scale) {
 function applySkin() {
   sendConfig()
   tray.setImage(trayIcon())
-  rebuildTray()
 }
 
 async function chooseSkin() {
@@ -333,7 +339,7 @@ async function checkUpdates({ manual = false } = {}) {
   if (manual) return promptUpdate(update)
   if (settings.skippedVersion === update.version) return
   if (Notification.isSupported()) {
-    const note = new Notification({ title: 'Whale Usage 有新版本', body: `v${update.version}，点这里查看更新内容` })
+    const note = new Notification({ title: 'Whale Usage 有新版本', body: `v${update.version}，点这里查看更新内容`, icon: APP_ICON })
     note.on('click', () => promptUpdate(update))
     note.show()
   }
