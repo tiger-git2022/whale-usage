@@ -7,9 +7,14 @@
   "author": "tiger",
   "license": "MIT",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tiger-git2022/whale-usage.git"
+  },
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win portable nsis"
+    "dist": "electron-builder --win portable nsis",
+    "test": "node --test test/*.test.js"
   },
   "build": {
     "appId": "local.whale-usage-widget",
@@ -27,10 +32,10 @@
       "icon": "build/icon.png"
     },
     "portable": {
-      "artifactName": "WhaleUsage-${version}-portable.exe"
+      "artifactName": "WhaleUsage-v${version}-portable.exe"
     },
     "nsis": {
-      "artifactName": "WhaleUsage-${version}-setup.exe",
+      "artifactName": "WhaleUsage-v${version}-setup.exe",
       "oneClick": true
     },
     "electronDist": "node_modules/electron/dist"

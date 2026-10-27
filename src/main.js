@@ -1,8 +1,10 @@
-const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, screen, shell } = require('electron')
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, screen, shell } = require('electron')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const { pathToFileURL } = require('url')
+const log = require('./log')
+const updater = require('./updater')
 const { claudeState } = require('./win32')
 
 // The widget window at 100% size: the character sits at its bottom-right, the bubble above it.
@@ -17,6 +19,8 @@ const SIZES = [
   { label: '特大', scale: 1.1 },
 ]
 const TICK_MS = 80
+const UPDATE_FIRST_CHECK_MS = 15 * 1000
+const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
 const SNAP_DIP = 28
 
 const DEFAULTS = {
@@ -28,6 +32,8 @@ const DEFAULTS = {
   showWhen: 'front', // 'front': only while Claude is the active window; 'open': whenever Claude is not minimized
   sound: true,
   skin: null, // absolute path to a custom image, or null for the bundled one
+  autoUpdate: true, // check for a new release at start and every few hours
+  skippedVersion: null, // a release the person chose to skip; a later one is offered again
 }
 
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json')
@@ -45,6 +51,9 @@ let dragging = null
 let lastBounds = null
 let isShown = false
 let lastClaudeRect = null
+let claudeSeen = null // for logging when Claude's window appears or goes
+let pendingUpdate = null // the newer release found by the last check
+let updateProgress = null // text while an update downloads
 
 function loadSettings() {
   try {
@@ -103,10 +112,15 @@ function tick() {
   try {
     state = claudeState(cachedClaude, process.pid)
   } catch (err) {
-    console.error('claude window lookup failed', err)
+    log.error('claude window lookup failed', err)
     return
   }
   cachedClaude = state.window
+  const seen = state.window ? state.window.hwnd : 0
+  if (seen !== claudeSeen) {
+    log.info(seen ? `following Claude window ${seen} (pid ${state.window.pid})` : 'no Claude window')
+    claudeSeen = seen
+  }
   if (!state.window || state.minimized) return setShown(false)
 
   const claude = toDip(state.rect)
@@ -140,7 +154,10 @@ function sendUsage() {
   let usage = null
   try {
     usage = JSON.parse(fs.readFileSync(usagePath(), 'utf8'))
-  } catch {}
+    log.info('usage', (usage.limits || []).map(l => `${l.kind} ${l.percentUsed}%`).join(', '))
+  } catch (err) {
+    if (err.code !== 'ENOENT') log.warn('could not read usage file', err.message)
+  }
   win.webContents.send('usage', usage)
 }
 
@@ -162,7 +179,15 @@ function rebuildTray() {
       saveSettings()
     },
   })
+  const updateItems = updateProgress
+    ? [{ label: updateProgress, enabled: false }]
+    : pendingUpdate
+      ? [{ label: `更新到 v${pendingUpdate.version}…`, click: () => promptUpdate(pendingUpdate) }]
+      : []
   const menu = Menu.buildFromTemplate([
+    { label: `Whale Usage v${app.getVersion()}`, enabled: false },
+    ...updateItems,
+    { type: 'separator' },
     { label: '显示额度气泡', click: () => win.webContents.send('show-bubble') },
     { type: 'separator' },
     { label: '只在 Claude 是当前窗口时显示', ...showWhen('front') },
@@ -212,7 +237,19 @@ function rebuildTray() {
         lastBounds = null
       },
     },
+    { type: 'separator' },
+    { label: '检查更新', enabled: !updateProgress, click: () => checkUpdates({ manual: true }) },
+    {
+      label: '自动检查更新',
+      type: 'checkbox',
+      checked: settings.autoUpdate,
+      click: item => {
+        settings.autoUpdate = item.checked
+        saveSettings()
+      },
+    },
     { label: '打开额度数据文件夹', click: () => shell.openPath(path.dirname(usagePath())) },
+    { label: '打开日志文件夹', click: () => shell.openPath(log.dir()) },
     { type: 'separator' },
     { label: '退出', click: () => app.quit() },
   ])
@@ -248,6 +285,93 @@ async function chooseSkin() {
   settings.skin = target
   saveSettings()
   applySkin()
+}
+
+// ---------- updates ----------
+
+// The Chinese half of the release notes, without the download section, as plain text.
+function notesForDialog(notes) {
+  const chinese = notes.split(/\n-{3,}\n/)[0].split(/###\s*下载/)[0]
+  const text = chinese
+    .replace(/^#+\s*/gm, '')
+    .replace(/`/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .trim()
+  return text.length > 1200 ? `${text.slice(0, 1200)}…` : text
+}
+
+async function checkUpdates({ manual = false } = {}) {
+  if (updateProgress) return
+  let update
+  try {
+    update = await updater.checkForUpdate()
+  } catch (err) {
+    log.error('update check failed', err)
+    if (manual) dialog.showErrorBox('检查更新失败', `${err.message}\n\n可以到发布页手动下载：${updater.RELEASES_URL}`)
+    return
+  }
+  pendingUpdate = update
+  rebuildTray()
+  if (!update) {
+    if (manual) {
+      dialog.showMessageBox({ type: 'info', title: '检查更新', message: `已经是最新版本（v${app.getVersion()}）` })
+    }
+    return
+  }
+  if (manual) return promptUpdate(update)
+  if (settings.skippedVersion === update.version) return
+  if (Notification.isSupported()) {
+    const note = new Notification({ title: 'Whale Usage 有新版本', body: `v${update.version}，点这里查看更新内容` })
+    note.on('click', () => promptUpdate(update))
+    note.show()
+  }
+}
+
+async function promptUpdate(update) {
+  const { response } = await dialog.showMessageBox({
+    type: 'info',
+    title: '发现新版本',
+    message: `Whale Usage v${update.version}`,
+    detail: `当前版本 v${app.getVersion()}\n\n${notesForDialog(update.notes)}`,
+    buttons: ['下载并更新', '查看发布页', '跳过这个版本', '以后再说'],
+    defaultId: 0,
+    cancelId: 3,
+    noLink: true,
+  })
+  if (response === 1) shell.openExternal(update.pageUrl)
+  if (response === 2) {
+    settings.skippedVersion = update.version
+    saveSettings()
+  }
+  if (response !== 0) return
+
+  const setProgress = text => {
+    updateProgress = text
+    tray.setToolTip(text ? `Whale Usage：${text}` : 'Whale Usage：Claude 额度')
+    rebuildTray()
+  }
+  try {
+    setProgress('正在下载更新…')
+    let lastPercent = -1
+    await updater.installUpdate(update, (done, total) => {
+      if (!total) return
+      const percent = Math.floor((done / total) * 100)
+      if (percent !== lastPercent && percent % 5 === 0) {
+        lastPercent = percent
+        setProgress(`正在下载更新 ${percent}%`)
+      }
+    })
+  } catch (err) {
+    log.error('update failed', err)
+    setProgress(null)
+    dialog.showErrorBox('更新失败', `${err.message}\n\n可以到发布页手动下载：${update.pageUrl}`)
+  }
+}
+
+function scheduleUpdateChecks() {
+  const run = () => settings.autoUpdate && checkUpdates()
+  setTimeout(run, UPDATE_FIRST_CHECK_MS)
+  setInterval(run, UPDATE_INTERVAL_MS)
 }
 
 function watchUsage() {
@@ -328,7 +452,11 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.whenReady().then(() => {
+    log.init(path.join(app.getPath('userData'), 'logs'))
+    log.info(`start v${app.getVersion()}`, process.env.PORTABLE_EXECUTABLE_FILE ? `portable ${process.env.PORTABLE_EXECUTABLE_FILE}` : 'installed', `usage file ${usagePath()}`)
+    process.on('uncaughtException', err => log.error('uncaught', err))
     loadSettings()
+    updater.cleanUpAfterUpdate()
     createWindow()
     tray = new Tray(trayIcon())
     tray.setToolTip('Whale Usage：Claude 额度')
@@ -336,6 +464,8 @@ if (!app.requestSingleInstanceLock()) {
     rebuildTray()
     watchUsage()
     setInterval(tick, TICK_MS)
+    scheduleUpdateChecks()
   })
+  app.on('will-quit', () => log.info('quit'))
   app.on('window-all-closed', e => e.preventDefault())
 }
