@@ -1,6 +1,6 @@
 {
   "name": "whale-usage-bridge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Shares your Claude subscription usage (5-hour and weekly limits), finished turns and waiting questions or approvals with the Whale Usage desktop widget, through files in ~/.claude/whale",
   "author": {
     "name": "tiger"

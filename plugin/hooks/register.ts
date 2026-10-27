@@ -46,10 +46,27 @@ async function whaleDir($: EngineInterface): Promise<string> {
   return `${home}/.claude/whale`
 }
 
+// The windows the file already holds; none when it is missing or unreadable
+async function savedLimits($: EngineInterface, file: string): Promise<SessionRateLimit[]> {
+  try {
+    const saved = JSON.parse(await $.fs.read(file)) as Partial<Snapshot>
+    return Array.isArray(saved.limits) ? saved.limits : []
+  } catch {
+    return []
+  }
+}
+
+// A response reports only some windows at times, so a window it leaves out keeps its last reading
+// until that window resets.
 async function saveUsage($: EngineInterface, limits: SessionRateLimit[], sessionCostUsd?: number) {
   if (limits.length === 0) return
-  const snapshot: Snapshot = { updatedAt: await $.clock.now(), limits, sessionCostUsd }
-  await $.fs.write(`${await whaleDir($)}/usage.json`, JSON.stringify(snapshot, null, 2))
+  const file = `${await whaleDir($)}/usage.json`
+  const now = await $.clock.now()
+  const kept = (await savedLimits($, file)).filter(
+    old => !limits.some(l => l.kind === old.kind) && old.resetsAt !== undefined && Date.parse(old.resetsAt) > now,
+  )
+  const snapshot: Snapshot = { updatedAt: now, limits: [...limits, ...kept], sessionCostUsd }
+  await $.fs.write(file, JSON.stringify(snapshot, null, 2))
 }
 
 // Each window's percent as the widget shows it (whole numbers), by kind
