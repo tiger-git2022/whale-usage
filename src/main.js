@@ -7,6 +7,7 @@ const log = require('./log')
 const menu = require('./menu')
 const sessions = require('./sessions')
 const updater = require('./updater')
+const composer = require('./composer')
 const { claudeState } = require('./win32')
 
 // The widget window at 100% size: the character sits at its bottom-right, the bubble above it.
@@ -30,6 +31,9 @@ const DEFAULTS = {
   // The default peeks in from Claude's right edge, just above the input box. The art is cropped
   // on its right side, so that edge sits flush with the window (the screen edge when maximized).
   anchor: { dx: 0, dy: -100 },
+  // With snapToBox, the same corner measured from the input box's top-right corner instead
+  snapToBox: true,
+  boxAnchor: { dx: 0, dy: 2 },
   scale: 0.7,
   showWhen: 'front', // 'front': only while Claude is the active window; 'open': whenever Claude is not minimized
   sound: true,
@@ -62,6 +66,7 @@ let dragging = null
 let lastBounds = null
 let isShown = false
 let lastClaudeRect = null
+let lastBoxRect = null // the input box the character sat on at the last tick (DIP), or null
 let claudeSeen = null // for logging when Claude's window appears or goes
 let pendingUpdate = null // the newer release found by the last check
 let updateProgress = null // text while an update downloads
@@ -107,11 +112,11 @@ function toDip(rect) {
   })
 }
 
-// Window position for a given Claude rectangle (DIP) and the saved anchor.
-function boundsFor(claude) {
+// Window position for a given Claude rectangle (DIP) and the saved anchor; on the input box when it is known.
+function boundsFor(claude, box) {
   const d = dims()
-  const petRight = claude.x + claude.width + settings.anchor.dx
-  const petBottom = claude.y + claude.height + settings.anchor.dy
+  const petRight = box ? box.x + box.width + settings.boxAnchor.dx : claude.x + claude.width + settings.anchor.dx
+  const petBottom = box ? box.y + settings.boxAnchor.dy : claude.y + claude.height + settings.anchor.dy
   return {
     x: Math.round(petRight + d.inset - d.w),
     y: Math.round(petBottom + d.inset - d.h),
@@ -145,17 +150,24 @@ function tick() {
   if (!state.window || state.minimized) return setShown(false)
 
   const claude = toDip(state.rect)
+  const inFront = state.claudeInFront || state.selfInFront || dragging
+  const show = settings.showWhen === 'open' || process.env.WHALE_FORCE_SHOW === '1' ? true : Boolean(inFront)
+  // Only asked while the character shows, so a Claude window in the background is left alone
+  if (settings.snapToBox && show) composer.poll(state.window.hwnd)
+  const boxRect = settings.snapToBox ? composer.boxOf(state.window.hwnd) : null
+  const box = boxRect ? toDip(boxRect) : null
+  if (Boolean(box) !== Boolean(lastBoxRect)) log.info(box ? `on the input box ${JSON.stringify(box)}` : 'no input box, by the window corner')
   if (!dragging) {
-    const b = boundsFor(claude)
+    const b = boundsFor(claude, box)
     if (!lastBounds || b.x !== lastBounds.x || b.y !== lastBounds.y || b.width !== lastBounds.width) {
       win.setBounds(b)
       lastBounds = b
     }
   }
   lastClaudeRect = claude
+  if (!dragging) lastBoxRect = box
 
-  const inFront = state.claudeInFront || state.selfInFront || dragging
-  setShown(settings.showWhen === 'open' || process.env.WHALE_FORCE_SHOW === '1' ? true : inFront)
+  setShown(show)
 }
 
 // Snaps the character flush to Claude's left or right edge when dropped close to it.
@@ -164,10 +176,18 @@ function anchorFromDrop(bounds) {
   const d = dims()
   let petRight = bounds.x + d.w - d.inset
   const petBottom = bounds.y + d.h - d.inset
+  if (lastBoxRect) {
+    const box = lastBoxRect
+    const right = box.x + box.width
+    if (Math.abs(petRight - right) < SNAP_DIP) petRight = right
+    let dy = petBottom - box.y
+    if (Math.abs(dy - DEFAULTS.boxAnchor.dy) < SNAP_DIP) dy = DEFAULTS.boxAnchor.dy
+    return { boxAnchor: { dx: Math.round(petRight - right), dy: Math.round(dy) } }
+  }
   const right = c.x + c.width
   if (Math.abs(petRight - right) < SNAP_DIP) petRight = right
   if (Math.abs(petRight - d.pet - c.x) < SNAP_DIP) petRight = c.x + d.pet
-  return { dx: Math.round(petRight - right), dy: Math.round(petBottom - (c.y + c.height)) }
+  return { anchor: { dx: Math.round(petRight - right), dy: Math.round(petBottom - (c.y + c.height)) } }
 }
 
 function sendUsage() {
@@ -234,6 +254,7 @@ function openMenu(at) {
     },
     { type: 'chips', icon: 'E77B', text: '形象', chips: skins },
     { type: 'item', id: 'skin:pick', icon: 'EB9F', text: '用自己的图片…' },
+    { type: 'item', id: 'snap', icon: 'E718', text: '贴着输入框', checked: settings.snapToBox },
     { type: 'item', id: 'reset', icon: 'E7A7', text: '重置位置' },
     { type: 'separator' },
     { type: 'item', id: 'notify:wait', icon: 'EA8F', text: '等我回答或批准时提醒', checked: settings.notifyWait },
@@ -255,7 +276,13 @@ function openMenu(at) {
     'show:front': () => setSetting('showWhen', 'front'),
     'show:open': () => setSetting('showWhen', 'open'),
     'skin:pick': chooseSkin,
+    snap: () => {
+      setSetting('snapToBox', !settings.snapToBox)
+      if (!settings.snapToBox) composer.stop()
+      lastBounds = null
+    },
     reset: () => {
+      settings.boxAnchor = { ...DEFAULTS.boxAnchor }
       setSetting('anchor', { ...DEFAULTS.anchor })
       lastBounds = null
     },
@@ -517,12 +544,15 @@ ipcMain.on('resize-step', (_e, direction) => setScale(settings.scale + direction
 ipcMain.on('drag-end', () => {
   if (!dragging) return
   if (lastClaudeRect) {
-    settings.anchor = anchorFromDrop(win.getBounds())
+    Object.assign(settings, anchorFromDrop(win.getBounds()))
     saveSettings()
   }
   dragging = null
   lastBounds = null
 })
+
+// For trying a build next to the running one: its own settings, log and single-instance lock
+if (process.env.WHALE_USER_DATA) app.setPath('userData', process.env.WHALE_USER_DATA)
 
 const finishing = updater.finishTarget()
 if (finishing) {
@@ -553,6 +583,9 @@ if (finishing) {
     setInterval(tick, TICK_MS)
     scheduleUpdateChecks()
   })
-  app.on('will-quit', () => log.info('quit'))
+  app.on('will-quit', () => {
+    composer.stop()
+    log.info('quit')
+  })
   app.on('window-all-closed', e => e.preventDefault())
 }

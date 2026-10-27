@@ -49,9 +49,11 @@ git config --global http.https://github.com.proxy http://127.0.0.1:7890
 | 操作 | 效果 |
 | --- | --- |
 | 单击形象 | 打开或关闭额度气泡 |
-| 按住拖动 | 移动位置，会记住它相对 Claude 窗口的位置；靠近窗口左右边缘会自动吸附 |
+| 按住拖动 | 移动位置，会记住它相对输入框（或 Claude 窗口）的位置；靠近右边缘会自动吸附 |
 | 在形象上滚动滚轮 | 放大或缩小 |
-| 右键形象或托盘图标 | 打开菜单：显示时机、大小、切换形象、用自己的图片、重置位置、两种提醒、音效、开机自启、检查更新、打开日志、退出 |
+| 右键形象或托盘图标 | 打开菜单：显示时机、大小、切换形象、用自己的图片、贴着输入框、重置位置、两种提醒、音效、开机自启、检查更新、打开日志、退出 |
+
+默认「贴着输入框」：鲸鱼站在 Claude 输入框的右上角，输入框打字变高、加附件、开分屏时跟着移动；分屏时站在最右边那个输入框上。位置是通过 Windows 的辅助功能接口（UI 自动化）读 Claude 窗口里的输入框得到的，后台会开一个不显示窗口的 PowerShell。找不到输入框时（比如在设置页），回到按窗口右下角定位。不想要就在右键菜单里关掉「贴着输入框」。
 
 额度只在使用 Claude Code（桌面 App 的 Code 标签页或终端）时刷新，不用的时候显示最后一次的数字和重置倒计时。
 
@@ -106,6 +108,10 @@ A desktop pet that sits next to the Claude desktop app and shows your Claude sub
 Send Claude a message and the usage appears.
 
 If adding the marketplace says it cannot connect, Claude cannot reach GitHub: it fetches plugins with git, which ignores the system proxy. With a proxy running, point git at it for GitHub (use your proxy's port): `git config --global http.https://github.com.proxy http://127.0.0.1:7890`.
+
+### Position
+
+By default the character stands on the top-right corner of Claude's input box (menu: 贴着输入框) and moves with it as the prompt grows, attachments are added or panes are split (it takes the rightmost box). The box is found through Windows UI Automation by a hidden PowerShell process. Where there is no input box, such as Claude's settings, it falls back to the window's bottom-right corner. Dragging the character keeps it where you drop it, measured from the box.
 
 ### Reminders
 
