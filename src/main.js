@@ -37,8 +37,7 @@ const DEFAULTS = {
   notifyTurn: true, // bubble and sound when a turn ends having used at least 1% of a window
   skin: 'peek', // one of SKINS, or 'custom' for customSkin
   customSkin: null, // a picture the person chose, copied into the app's data folder
-  autoUpdate: true, // check for a new release at start and every few hours
-  skippedVersion: null, // a release the person chose to skip; a later one is offered again
+  autoUpdate: true, // look for a new release at start and every few hours, and install it right away
 }
 
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json')
@@ -241,7 +240,7 @@ function openMenu(at) {
     { type: 'item', id: 'notify:turn', icon: 'E930', text: '每轮结束提示用了多少额度', checked: settings.notifyTurn },
     { type: 'item', id: 'sound', icon: 'E767', text: '音效', checked: settings.sound },
     { type: 'item', id: 'autostart', icon: 'E7E8', text: '开机自启', checked: autoStart },
-    { type: 'item', id: 'autoupdate', icon: 'E895', text: '自动检查更新', checked: settings.autoUpdate },
+    { type: 'item', id: 'autoupdate', icon: 'E895', text: '自动更新', checked: settings.autoUpdate },
     { type: 'item', id: 'check', icon: 'E72C', text: '检查更新', enabled: !updateProgress },
     { type: 'separator' },
     { type: 'item', id: 'data', icon: 'E838', text: '打开额度数据文件夹' },
@@ -347,38 +346,27 @@ async function checkUpdates({ manual = false } = {}) {
     }
     return
   }
-  if (manual) return promptUpdate(update)
-  if (settings.skippedVersion === update.version) return
-  if (Notification.isSupported()) {
-    const note = new Notification({ title: 'Whale Usage 有新版本', body: `v${update.version}，点这里查看更新内容`, icon: APP_ICON })
-    note.on('click', () => promptUpdate(update))
-    note.show()
+  // The portable exe updates itself right away; a run from source can only point at the release page.
+  if (!process.env.PORTABLE_EXECUTABLE_FILE) {
+    if (manual) promptUpdate(update)
+    return
   }
+  installNow(update, { manual })
 }
 
-async function promptUpdate(update) {
-  const { response } = await dialog.showMessageBox({
-    type: 'info',
-    title: '发现新版本',
-    message: `Whale Usage v${update.version}`,
-    detail: `当前版本 v${app.getVersion()}\n\n${notesForDialog(update.notes)}`,
-    buttons: ['下载并更新', '查看发布页', '跳过这个版本', '以后再说'],
-    defaultId: 0,
-    cancelId: 3,
-    noLink: true,
-  })
-  if (response === 1) shell.openExternal(update.pageUrl)
-  if (response === 2) {
-    settings.skippedVersion = update.version
-    saveSettings()
-  }
-  if (response !== 0) return
+function notify(title, body) {
+  if (Notification.isSupported()) new Notification({ title, body, icon: APP_ICON }).show()
+}
 
+// Downloads the new release, then the app quits, the exe is replaced and started again (a few seconds).
+async function installNow(update, { manual = false } = {}) {
+  if (updateProgress) return
   const setProgress = text => {
     updateProgress = text
-    tray.setToolTip(text ? `Whale Usage：${text}` : 'Whale Usage：Claude 额度')
     rebuildTray()
   }
+  log.info(`updating to ${update.version}`, manual ? '(asked)' : '(automatic)')
+  notify('Whale Usage 正在更新', `下载 v${update.version}，完成后会自动重启`)
   try {
     setProgress('正在下载更新…')
     let lastPercent = -1
@@ -393,8 +381,27 @@ async function promptUpdate(update) {
   } catch (err) {
     log.error('update failed', err)
     setProgress(null)
-    dialog.showErrorBox('更新失败', `${err.message}\n\n可以到发布页手动下载：${update.pageUrl}`)
+    if (manual) dialog.showErrorBox('更新失败', `${err.message}\n\n可以到发布页手动下载：${update.pageUrl}`)
+    else notify('Whale Usage 自动更新失败', '可以在右键菜单里点「检查更新」再试一次')
   }
+}
+
+// For a run from source (no exe to replace), or the menu's update row after a failed update
+async function promptUpdate(update) {
+  const portable = Boolean(process.env.PORTABLE_EXECUTABLE_FILE)
+  const { response } = await dialog.showMessageBox({
+    type: 'info',
+    title: '发现新版本',
+    message: `Whale Usage v${update.version}`,
+    detail: `当前版本 v${app.getVersion()}\n\n${notesForDialog(update.notes)}`,
+    buttons: portable ? ['下载并更新', '查看发布页', '以后再说'] : ['查看发布页', '以后再说'],
+    defaultId: 0,
+    cancelId: portable ? 2 : 1,
+    noLink: true,
+  })
+  const choice = portable ? response : response + 1
+  if (choice === 0) installNow(update, { manual: true })
+  if (choice === 1) shell.openExternal(update.pageUrl)
 }
 
 function scheduleUpdateChecks() {

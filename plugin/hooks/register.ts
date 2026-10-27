@@ -56,16 +56,22 @@ async function savedLimits($: EngineInterface, file: string): Promise<SessionRat
   }
 }
 
-// A response reports only some windows at times, so a window it leaves out keeps its last reading
-// until that window resets.
+// Merges a session's reading into what the file holds; every session writes the same file.
+// - Use within one window only grows, but a session on another model can report a lower figure under
+//   the same name (a model's own weekly limit), so within the same window the higher figure stays.
+// - A response reports only some windows at times; a window it leaves out keeps its last reading
+//   until that window resets.
 async function saveUsage($: EngineInterface, limits: SessionRateLimit[], sessionCostUsd?: number) {
   if (limits.length === 0) return
   const file = `${await whaleDir($)}/usage.json`
   const now = await $.clock.now()
-  const kept = (await savedLimits($, file)).filter(
-    old => !limits.some(l => l.kind === old.kind) && old.resetsAt !== undefined && Date.parse(old.resetsAt) > now,
-  )
-  const snapshot: Snapshot = { updatedAt: now, limits: [...limits, ...kept], sessionCostUsd }
+  const saved = (await savedLimits($, file)).filter(l => l.resetsAt !== undefined && Date.parse(l.resetsAt) > now)
+  const merged = limits.map(limit => {
+    const old = saved.find(l => l.kind === limit.kind)
+    return old && old.resetsAt === limit.resetsAt && old.percentUsed > limit.percentUsed ? old : limit
+  })
+  const kept = saved.filter(old => !limits.some(l => l.kind === old.kind))
+  const snapshot: Snapshot = { updatedAt: now, limits: [...merged, ...kept], sessionCostUsd }
   await $.fs.write(file, JSON.stringify(snapshot, null, 2))
 }
 
