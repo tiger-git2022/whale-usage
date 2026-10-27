@@ -524,7 +524,16 @@ ipcMain.on('drag-end', () => {
   lastBounds = null
 })
 
-if (!app.requestSingleInstanceLock()) {
+const finishing = updater.finishTarget()
+if (finishing) {
+  // This is the new exe of an update, started only to put itself in place of the old one
+  app.whenReady().then(async () => {
+    log.init(path.join(app.getPath('userData'), 'logs'))
+    log.info(`finishing the update to v${app.getVersion()}`)
+    await updater.finishUpdate(finishing)
+    app.exit(0)
+  })
+} else if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.whenReady().then(() => {

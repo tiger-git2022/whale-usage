@@ -7,7 +7,6 @@
 
 const { app, net } = require('electron')
 const fs = require('fs')
-const os = require('os')
 const path = require('path')
 const { spawn } = require('child_process')
 const log = require('./log')
@@ -82,27 +81,17 @@ async function download(url, target, onProgress) {
 // The portable exe stays locked while this copy runs (its launcher keeps it open), so a small script
 // waits for it to close, moves the new exe over it and starts it. ping is the delay because timeout
 // does not work without a console.
-function swapScript(fresh, target) {
-  return [
-    '@echo off',
-    'chcp 65001 >nul',
-    `set "SRC=${fresh}"`,
-    `set "DST=${target}"`,
-    'for /l %%i in (1,1,120) do (',
-    '  move /y "%SRC%" "%DST%" >nul 2>&1 && goto started',
-    '  ping -n 2 127.0.0.1 >nul',
-    ')',
-    'exit /b 1',
-    ':started',
-    'start "" "%DST%"',
-    '(goto) 2>nul & del "%~f0"',
-    '',
-  ].join('\r\n')
-}
+// How the new exe is told to put itself in place: `<new exe> --whale-finish-update <old exe>`
+const FINISH_FLAG = '--whale-finish-update'
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 /**
- * Downloads the update beside this exe; once this copy quits, a script moves it over the old exe
- * and starts it. Only the portable exe updates itself (a source checkout has no exe to replace).
+ * Downloads the update beside this exe as `<exe>.new`, starts it to finish the update, and quits.
+ *
+ * The running exe cannot be replaced or renamed (Windows locks it), and a helper script would need a
+ * console program, which shows a window. So the new exe does the swap itself (finishUpdate): it is a
+ * windowed program like this one, needs no script, and Chinese or other characters in paths are fine.
+ * Only the portable exe updates itself (a source checkout has no exe to replace).
  */
 async function installUpdate(update, onProgress) {
   const portable = portableFile()
@@ -113,28 +102,58 @@ async function installUpdate(update, onProgress) {
 
   const fresh = `${portable}.new`
   await download(asset.url, fresh, onProgress)
-  const script = path.join(os.tmpdir(), `whale-usage-update-${Date.now()}.cmd`)
-  fs.writeFileSync(script, swapScript(fresh, portable), 'utf8')
-  log.info('replacing', portable, 'after quitting, via', script)
+  log.info('starting the new version to replace', portable)
   app.releaseSingleInstanceLock()
-  spawn('cmd.exe', ['/c', script], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+  spawn(fresh, [FINISH_FLAG, portable], { detached: true, stdio: 'ignore' }).unref()
   app.quit()
 }
 
-/** Removes what an interrupted portable update left behind. */
-function cleanUpAfterUpdate() {
+/** The old exe to replace, when this copy was started to finish an update; otherwise null. */
+function finishTarget() {
+  const at = process.argv.indexOf(FINISH_FLAG)
+  return at >= 0 && process.argv[at + 1] ? process.argv[at + 1] : null
+}
+
+/**
+ * Run by the new exe (`<old exe>.new`): waits for the old copy to quit, copies itself over it and
+ * starts it. A copy, not a move: this file is in use while it runs. The started copy removes it.
+ */
+async function finishUpdate(target) {
+  const self = portableFile()
+  if (!self) return log.error('finish update: not started as the portable exe')
+  let lastError = null
+  for (let i = 0; i < 120; i++) {
+    try {
+      fs.copyFileSync(self, target)
+      log.info('update finished, starting', target)
+      spawn(target, [], { detached: true, stdio: 'ignore' }).unref()
+      return
+    } catch (err) {
+      lastError = err
+      await sleep(1000)
+    }
+  }
+  log.error('finish update: could not replace', target, lastError)
+}
+
+/**
+ * Removes the `<exe>.new` an update left behind. Right after an update the copy that finished it may
+ * still be closing, so this keeps trying for a minute.
+ */
+async function cleanUpAfterUpdate() {
   const portable = portableFile()
   if (!portable) return
-  for (const leftover of [`${portable}.new`]) {
+  const leftover = `${portable}.new`
+  for (let i = 0; i < 30 && fs.existsSync(leftover); i++) {
     try {
-      if (fs.existsSync(leftover)) {
-        fs.rmSync(leftover, { force: true })
-        log.info('removed', leftover)
-      }
+      fs.rmSync(leftover, { force: true })
+      log.info('removed', leftover)
+      return
     } catch (err) {
-      log.warn('could not remove', leftover, err.message)
+      if (i === 29) log.warn('could not remove', leftover, err.message)
+      await sleep(2000)
     }
   }
 }
 
-module.exports = { checkForUpdate, installUpdate, cleanUpAfterUpdate, RELEASES_URL }
+module.exports = { checkForUpdate, installUpdate, finishTarget, finishUpdate, cleanUpAfterUpdate, RELEASES_URL }
