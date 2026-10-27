@@ -1,9 +1,10 @@
-const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, screen, shell } = require('electron')
+const { app, BrowserWindow, Notification, Tray, dialog, ipcMain, nativeImage, screen, shell } = require('electron')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const { pathToFileURL } = require('url')
 const log = require('./log')
+const menu = require('./menu')
 const updater = require('./updater')
 const { claudeState } = require('./win32')
 
@@ -31,7 +32,8 @@ const DEFAULTS = {
   scale: 0.7,
   showWhen: 'front', // 'front': only while Claude is the active window; 'open': whenever Claude is not minimized
   sound: true,
-  skin: null, // absolute path to a custom image, or null for the bundled one
+  skin: 'peek', // one of SKINS, or 'custom' for customSkin
+  customSkin: null, // a picture the person chose, copied into the app's data folder
   autoUpdate: true, // check for a new release at start and every few hours
   skippedVersion: null, // a release the person chose to skip; a later one is offered again
 }
@@ -41,7 +43,13 @@ const usagePath = () =>
   process.env.CLAUDE_CONFIG_DIR
     ? path.join(process.env.CLAUDE_CONFIG_DIR, 'whale', 'usage.json')
     : path.join(os.homedir(), '.claude', 'whale', 'usage.json')
-const bundledSkin = () => path.join(__dirname, '..', 'skins', 'default', 'character.png')
+// The bundled characters, each skins/<id>/character.png: square, transparent, cropped at the right
+// and bottom edges so it peeks in from the corner.
+const SKINS = [
+  { id: 'peek', name: '探头' },
+  { id: 'smile', name: '笑脸' },
+]
+const bundledSkin = id => path.join(__dirname, '..', 'skins', id, 'character.png')
 
 let settings = { ...DEFAULTS }
 let win = null
@@ -57,9 +65,18 @@ let updateProgress = null // text while an update downloads
 
 function loadSettings() {
   try {
-    settings = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) }
-  } catch {
+    // Notepad and PowerShell may save the file with a byte order mark
+    const text = fs.readFileSync(settingsPath(), 'utf8').replace(/^﻿/, '')
+    settings = { ...DEFAULTS, ...JSON.parse(text) }
+  } catch (err) {
+    if (err.code !== 'ENOENT') log.warn('settings unreadable, using defaults:', err.message)
     settings = { ...DEFAULTS }
+  }
+  // Before there were several characters, skin held the custom picture's path, or null
+  if (settings.skin === null) settings.skin = DEFAULTS.skin
+  if (settings.skin !== 'custom' && !SKINS.some(s => s.id === settings.skin)) {
+    settings.customSkin = settings.skin
+    settings.skin = 'custom'
   }
 }
 
@@ -69,7 +86,8 @@ function saveSettings() {
 }
 
 function skinPath() {
-  return settings.skin && fs.existsSync(settings.skin) ? settings.skin : bundledSkin()
+  if (settings.skin === 'custom' && settings.customSkin && fs.existsSync(settings.customSkin)) return settings.customSkin
+  return bundledSkin(SKINS.some(s => s.id === settings.skin) ? settings.skin : DEFAULTS.skin)
 }
 
 function dims() {
@@ -170,90 +188,85 @@ function trayIcon() {
   return nativeImage.createFromPath(skinPath()).resize({ width: 16, height: 16, quality: 'best' })
 }
 
+// The tray tooltip follows a running update; the menu itself is built each time it opens.
 function rebuildTray() {
-  const showWhen = value => ({
-    type: 'radio',
-    checked: settings.showWhen === value,
-    click: () => {
-      settings.showWhen = value
-      saveSettings()
-    },
-  })
-  const updateItems = updateProgress
-    ? [{ label: updateProgress, enabled: false }]
-    : pendingUpdate
-      ? [{ label: `更新到 v${pendingUpdate.version}…`, click: () => promptUpdate(pendingUpdate) }]
-      : []
-  const menu = Menu.buildFromTemplate([
-    { label: `Whale Usage v${app.getVersion()}`, enabled: false },
-    ...updateItems,
+  tray.setToolTip(updateProgress ? `Whale Usage：${updateProgress}` : 'Whale Usage：Claude 额度')
+}
+
+function setSetting(key, value) {
+  settings[key] = value
+  saveSettings()
+}
+
+// The right-click menu, for the tray icon and the character. Icons are Segoe Fluent Icons code points.
+function openMenu(at) {
+  const autoStart = app.getLoginItemSettings().openAtLogin
+  const skins = SKINS.map(s => ({ id: `skin:${s.id}`, text: s.name, selected: settings.skin === s.id }))
+  if (settings.customSkin) skins.push({ id: 'skin:custom', text: '自定义', selected: settings.skin === 'custom' })
+
+  const entries = [
+    { type: 'header', icon: 'E9D9', text: `Whale Usage v${app.getVersion()}` },
+    ...(updateProgress
+      ? [{ type: 'item', id: 'none', icon: 'E896', text: updateProgress, enabled: false }]
+      : pendingUpdate
+        ? [{ type: 'item', id: 'update', icon: 'E896', text: `更新到 v${pendingUpdate.version}…` }]
+        : []),
     { type: 'separator' },
-    { label: '显示额度气泡', click: () => win.webContents.send('show-bubble') },
-    { type: 'separator' },
-    { label: '只在 Claude 是当前窗口时显示', ...showWhen('front') },
-    { label: 'Claude 没最小化就一直显示', ...showWhen('open') },
-    { type: 'separator' },
-    {
-      label: '音效',
-      type: 'checkbox',
-      checked: settings.sound,
-      click: item => {
-        settings.sound = item.checked
-        saveSettings()
-        sendConfig()
-      },
-    },
-    {
-      label: '开机自启',
-      type: 'checkbox',
-      checked: app.getLoginItemSettings().openAtLogin,
-      click: item => app.setLoginItemSettings({ openAtLogin: item.checked }),
-    },
+    { type: 'item', id: 'bubble', icon: 'E8BD', text: '显示额度气泡' },
+    { type: 'item', id: 'show:front', icon: 'E7F4', text: '只在 Claude 是当前窗口时显示', checked: settings.showWhen === 'front' },
+    { type: 'item', id: 'show:open', icon: 'E8A7', text: 'Claude 没最小化就一直显示', checked: settings.showWhen === 'open' },
     { type: 'separator' },
     {
-      label: '大小（也可以在形象上滚动滚轮）',
-      submenu: SIZES.map(size => ({
-        label: size.label,
-        type: 'radio',
-        checked: Math.abs(settings.scale - size.scale) < 0.001,
-        click: () => setScale(size.scale),
-      })),
+      type: 'chips',
+      icon: 'E71E',
+      text: '大小',
+      chips: SIZES.map(size => ({ id: `size:${size.scale}`, text: size.label, selected: Math.abs(settings.scale - size.scale) < 0.001 })),
     },
-    { label: '更换形象…', click: chooseSkin },
-    {
-      label: '恢复默认形象',
-      enabled: Boolean(settings.skin),
-      click: () => {
-        settings.skin = null
-        saveSettings()
-        applySkin()
-      },
-    },
-    {
-      label: '重置位置',
-      click: () => {
-        settings.anchor = { ...DEFAULTS.anchor }
-        saveSettings()
-        lastBounds = null
-      },
-    },
+    { type: 'chips', icon: 'E77B', text: '形象', chips: skins },
+    { type: 'item', id: 'skin:pick', icon: 'EB9F', text: '用自己的图片…' },
+    { type: 'item', id: 'reset', icon: 'E7A7', text: '重置位置' },
     { type: 'separator' },
-    { label: '检查更新', enabled: !updateProgress, click: () => checkUpdates({ manual: true }) },
-    {
-      label: '自动检查更新',
-      type: 'checkbox',
-      checked: settings.autoUpdate,
-      click: item => {
-        settings.autoUpdate = item.checked
-        saveSettings()
-      },
-    },
-    { label: '打开额度数据文件夹', click: () => shell.openPath(path.dirname(usagePath())) },
-    { label: '打开日志文件夹', click: () => shell.openPath(log.dir()) },
+    { type: 'item', id: 'sound', icon: 'E767', text: '音效', checked: settings.sound },
+    { type: 'item', id: 'autostart', icon: 'E7E8', text: '开机自启', checked: autoStart },
+    { type: 'item', id: 'autoupdate', icon: 'E895', text: '自动检查更新', checked: settings.autoUpdate },
+    { type: 'item', id: 'check', icon: 'E72C', text: '检查更新', enabled: !updateProgress },
     { type: 'separator' },
-    { label: '退出', click: () => app.quit() },
-  ])
-  tray.setContextMenu(menu)
+    { type: 'item', id: 'data', icon: 'E838', text: '打开额度数据文件夹' },
+    { type: 'item', id: 'logs', icon: 'E8A5', text: '打开日志文件夹' },
+    { type: 'separator' },
+    { type: 'item', id: 'quit', icon: 'E8BB', text: '退出' },
+  ]
+
+  const handlers = {
+    update: () => promptUpdate(pendingUpdate),
+    bubble: () => win.webContents.send('show-bubble'),
+    'show:front': () => setSetting('showWhen', 'front'),
+    'show:open': () => setSetting('showWhen', 'open'),
+    'skin:pick': chooseSkin,
+    reset: () => {
+      setSetting('anchor', { ...DEFAULTS.anchor })
+      lastBounds = null
+    },
+    sound: () => {
+      setSetting('sound', !settings.sound)
+      sendConfig()
+    },
+    autostart: () => app.setLoginItemSettings({ openAtLogin: !autoStart }),
+    autoupdate: () => setSetting('autoUpdate', !settings.autoUpdate),
+    check: () => checkUpdates({ manual: true }),
+    data: () => shell.openPath(path.dirname(usagePath())),
+    logs: () => shell.openPath(log.dir()),
+    quit: () => app.quit(),
+  }
+  for (const size of SIZES) handlers[`size:${size.scale}`] = () => setScale(size.scale)
+  for (const skin of skins) handlers[skin.id] = () => useSkin(skin.id.slice('skin:'.length))
+
+  menu.show(entries, handlers, at)
+}
+
+function useSkin(id) {
+  setSetting('skin', id)
+  applySkin()
 }
 
 // Resizes around the character's bottom-right corner, which stays put.
@@ -282,9 +295,8 @@ async function chooseSkin() {
   const target = path.join(app.getPath('userData'), 'skins', 'custom' + path.extname(source).toLowerCase())
   fs.mkdirSync(path.dirname(target), { recursive: true })
   fs.copyFileSync(source, target)
-  settings.skin = target
-  saveSettings()
-  applySkin()
+  settings.customSkin = target
+  useSkin('custom')
 }
 
 // ---------- updates ----------
@@ -436,6 +448,8 @@ ipcMain.on('drag-move', () => {
   })
 })
 
+ipcMain.on('open-menu', () => openMenu())
+
 ipcMain.on('resize-step', (_e, direction) => setScale(settings.scale + direction * 0.05))
 
 ipcMain.on('drag-end', () => {
@@ -461,6 +475,7 @@ if (!app.requestSingleInstanceLock()) {
     tray = new Tray(trayIcon())
     tray.setToolTip('Whale Usage：Claude 额度')
     tray.on('click', () => win.webContents.send('show-bubble'))
+    tray.on('right-click', () => openMenu())
     rebuildTray()
     watchUsage()
     setInterval(tick, TICK_MS)

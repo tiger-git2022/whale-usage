@@ -222,6 +222,12 @@ document.addEventListener('mouseleave', () => {
 
 bubble.addEventListener('click', hideBubble)
 
+// Right-clicking the character opens the same menu as the tray icon.
+pet.addEventListener('contextmenu', e => {
+  e.preventDefault()
+  window.whale.openMenu()
+})
+
 // Scrolling over the character makes it bigger or smaller.
 pet.addEventListener('wheel', e => {
   e.preventDefault()

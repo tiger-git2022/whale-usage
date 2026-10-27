@@ -54,10 +54,8 @@ async function checkForUpdate() {
   }
 }
 
-/** The exe for how this copy runs: the portable one, or the installer. */
 function pickAsset(update) {
-  const kind = portableFile() ? 'portable' : 'setup'
-  return update.assets.find(a => a.name.endsWith('.exe') && a.name.includes(kind)) ?? null
+  return update.assets.find(a => a.name.endsWith('-portable.exe')) ?? null
 }
 
 async function download(url, target, onProgress) {
@@ -79,14 +77,6 @@ async function download(url, target, onProgress) {
     await new Promise(resolve => out.end(resolve))
   }
   if (total && done !== total) throw new Error(`download incomplete: ${done} of ${total} bytes`)
-}
-
-function launchAndQuit(file, args = []) {
-  log.info('starting', file, args.join(' '))
-  // The new copy must be able to take the single-instance lock
-  app.releaseSingleInstanceLock()
-  spawn(file, args, { detached: true, stdio: 'ignore' }).unref()
-  app.quit()
 }
 
 // The portable exe stays locked while this copy runs (its launcher keeps it open), so a small script
@@ -111,31 +101,24 @@ function swapScript(fresh, target) {
 }
 
 /**
- * Downloads the update and replaces this copy:
- * - portable: the new exe is saved beside this one, and once this copy quits a script moves it over
- *   the old exe and starts it;
- * - installed: the one-click installer runs, replaces the app and starts it again.
+ * Downloads the update beside this exe; once this copy quits, a script moves it over the old exe
+ * and starts it. Only the portable exe updates itself (a source checkout has no exe to replace).
  */
 async function installUpdate(update, onProgress) {
+  const portable = portableFile()
+  if (!portable) throw new Error('只有打包好的 exe 能自动更新，源码运行请用 git pull')
   const asset = pickAsset(update)
-  if (!asset) throw new Error('this release has no exe for this kind of install')
+  if (!asset) throw new Error('这个版本没有可下载的 exe')
   log.info('downloading', asset.name)
 
-  const portable = portableFile()
-  if (portable) {
-    const fresh = `${portable}.new`
-    await download(asset.url, fresh, onProgress)
-    const script = path.join(os.tmpdir(), `whale-usage-update-${Date.now()}.cmd`)
-    fs.writeFileSync(script, swapScript(fresh, portable), 'utf8')
-    log.info('replacing', portable, 'after quitting, via', script)
-    app.releaseSingleInstanceLock()
-    spawn('cmd.exe', ['/c', script], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
-    app.quit()
-  } else {
-    const installer = path.join(os.tmpdir(), asset.name)
-    await download(asset.url, installer, onProgress)
-    launchAndQuit(installer)
-  }
+  const fresh = `${portable}.new`
+  await download(asset.url, fresh, onProgress)
+  const script = path.join(os.tmpdir(), `whale-usage-update-${Date.now()}.cmd`)
+  fs.writeFileSync(script, swapScript(fresh, portable), 'utf8')
+  log.info('replacing', portable, 'after quitting, via', script)
+  app.releaseSingleInstanceLock()
+  spawn('cmd.exe', ['/c', script], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+  app.quit()
 }
 
 /** Removes what an interrupted portable update left behind. */

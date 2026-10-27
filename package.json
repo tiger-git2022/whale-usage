@@ -13,7 +13,7 @@
   },
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win portable nsis -c.electronDist=node_modules/electron/dist",
+    "dist": "electron-builder --win portable -c.electronDist=node_modules/electron/dist",
     "test": "node --test test/*.test.js"
   },
   "build": {
@@ -26,17 +26,12 @@
     ],
     "win": {
       "target": [
-        "portable",
-        "nsis"
+        "portable"
       ],
       "icon": "build/icon.png"
     },
     "portable": {
       "artifactName": "WhaleUsage-v${version}-portable.exe"
-    },
-    "nsis": {
-      "artifactName": "WhaleUsage-v${version}-setup.exe",
-      "oneClick": true
     }
   },
   "dependencies": {

@@ -9,4 +9,5 @@ contextBridge.exposeInMainWorld('whale', {
   dragMove: () => ipcRenderer.send('drag-move'),
   dragEnd: () => ipcRenderer.send('drag-end'),
   resizeStep: direction => ipcRenderer.send('resize-step', direction),
+  openMenu: () => ipcRenderer.send('open-menu'),
 })

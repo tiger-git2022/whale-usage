@@ -95,7 +95,7 @@ jobs:
           set -euo pipefail
           # The app reports this version, and the updater compares it with the latest release
           npm version "$VERSION" --no-git-tag-version --allow-same-version
-          npx electron-builder --win portable nsis --publish never
+          npx electron-builder --win portable --publish never
           ls -lh dist/*.exe
 
       - name: Upload exes
@@ -135,8 +135,7 @@ jobs:
           ### 本次更新
           ${changes:-- 无代码改动}
           ### 下载
-          - 免安装版：\`WhaleUsage-$TAG-portable.exe\`，双击运行
-          - 安装版：\`WhaleUsage-$TAG-setup.exe\`
+          - \`WhaleUsage-$TAG-portable.exe\`：免安装，放在任意文件夹双击运行
 
           已经在用的话，程序会自动提示更新，点「下载并更新」即可。第一次用还要在 Claude 里装 \`whale-usage-bridge\` 插件，见 [README](https://github.com/${{ github.repository }}#readme)。
 
@@ -144,7 +143,7 @@ jobs:
 
           A desktop pet next to the Claude desktop app that shows your Claude subscription's 5-hour and weekly usage. The changes are listed above.
 
-          **Download:** \`WhaleUsage-$TAG-portable.exe\` runs without installing; \`WhaleUsage-$TAG-setup.exe\` installs it. A running copy offers the update by itself. First time: also install the \`whale-usage-bridge\` plugin in Claude, see the README.
+          **Download:** \`WhaleUsage-$TAG-portable.exe\` runs without installing, from any folder. A running copy offers the update by itself. First time: also install the \`whale-usage-bridge\` plugin in Claude, see the README.
           EOF
           cat release-notes.md
 

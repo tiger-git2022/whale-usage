@@ -9,7 +9,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/tiger-git2022/whale-usage" alt="License"></a>
 </p>
 
-**[⬇ 下载最新版 / Download the latest release](https://github.com/tiger-git2022/whale-usage/releases/latest)**：免安装选 `WhaleUsage-v…-portable.exe`，想装到电脑上选 `WhaleUsage-v…-setup.exe`。/ `…-portable.exe` runs without installing; `…-setup.exe` installs it.
+**[⬇ 下载最新版 / Download the latest release](https://github.com/tiger-git2022/whale-usage/releases/latest)**：下载 `WhaleUsage-v…-portable.exe`，免安装，放在任意文件夹双击运行。/ Download `WhaleUsage-v…-portable.exe`; it runs from any folder without installing.
 
 [中文](#中文) | [English](#english)
 
@@ -35,7 +35,7 @@
 ### 下载与更新
 
 - 每次推送 `main` 都会由 GitHub Actions 打包，并发布一个带编号的新版本（[发布页](https://github.com/tiger-git2022/whale-usage/releases)）。版本号形如 `v0.1.0-t3`：前半部分是基础版本，`t` 后面的数字每次发布加一。旧版本都保留，每个版本附上距上一版的更新内容。
-- 程序启动时和之后每 6 小时检查一次更新（托盘菜单可以关掉，也可以手动「检查更新」）。有新版本会弹通知，点「下载并更新」会自动下载并替换：免安装版直接换掉 exe 文件，安装版运行新的安装程序，完成后自动重新打开。
+- 程序启动时和之后每 6 小时检查一次更新（托盘菜单可以关掉，也可以手动「检查更新」）。有新版本会弹通知，点「下载并更新」会下载新版，退出后用它替换原来的 exe 文件，然后自动重新打开。
 - 检查更新读取的是最新版附带的 `update.json`，读不到才用 GitHub API，不受 API 每小时 60 次的限制。
 
 ### 使用
@@ -45,7 +45,7 @@
 | 单击形象 | 打开或关闭额度气泡 |
 | 按住拖动 | 移动位置，会记住它相对 Claude 窗口的位置；靠近窗口左右边缘会自动吸附 |
 | 在形象上滚动滚轮 | 放大或缩小 |
-| 托盘图标右键 | 显示时机、大小、音效、开机自启、更换形象、重置位置、检查更新、打开日志、退出 |
+| 右键形象或托盘图标 | 打开菜单：显示时机、大小、切换形象、用自己的图片、重置位置、音效、开机自启、检查更新、打开日志、退出 |
 
 额度只在使用 Claude Code（桌面 App 的 Code 标签页或终端）时刷新，不用的时候显示最后一次的数字和重置倒计时。
 
@@ -66,9 +66,16 @@ npm start
 
 打包：`npm run dist`，产物在 `dist/`。国内网络下载 Electron 慢，可以先设置 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`。
 
+右键菜单的样式和 [Claude 自动审批](https://github.com/tiger-git2022/claude-auto-pass) 的 Windows 版一致：Windows 11 亚克力背景、圆角、Fluent 图标，跟随系统深浅色；方向键可以选择，Esc 关闭。
+
 ### 形象素材
 
-默认形象来自 [MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)。按原仓库 `PROVENANCE.md` 的说明，图片素材不在 MIT 许可范围内，只是原样提供。如果你是权利人并希望移除，请开 issue。托盘菜单「更换形象…」可以换成任意图片（建议正方形、透明背景的 PNG）。
+自带两个形象，在菜单里切换：
+
+- **探头**：来自 [MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)。按原仓库 `PROVENANCE.md` 的说明，图片素材不在 MIT 许可范围内，只是原样提供。
+- **笑脸**：由一张鲸鱼娘二创图抠图、裁剪而来。
+
+如果你是权利人并希望移除，请开 issue。菜单里「用自己的图片…」可以换成任意图片（建议正方形、透明背景的 PNG，右侧和下方裁掉的「探头」构图效果最好）。
 
 ## English
 
@@ -86,18 +93,19 @@ Send Claude a message and the usage appears.
 ### Download and updates
 
 - Every push to `main` is built by GitHub Actions and published as a new numbered [release](https://github.com/tiger-git2022/whale-usage/releases) such as `v0.1.0-t3`: the base version, then a build number that grows with each release. Earlier releases stay, and each lists the changes since the one before.
-- The app checks at start and every 6 hours (it can be turned off in the tray menu, or run by hand). On a new release it shows a notification; "下载并更新" downloads it and replaces the app: the portable exe swaps its own file, the installed app runs the new installer, and it starts again.
+- The app checks at start and every 6 hours (it can be turned off in the tray menu, or run by hand). On a new release it shows a notification; "下载并更新" downloads it, replaces the exe once the app has quit, and starts it again.
 - The check reads the `update.json` attached to the latest release and falls back to the GitHub API, so the API's 60 requests an hour limit does not apply.
 
 ### How it works
 
 - `plugin/`: after each Claude Code response, the plugin writes the reported rate-limit usage to `~/.claude/whale/usage.json`, through the official plugin API, without reading any credentials.
 - `src/`: the Electron app shows that file, finds the Claude window through Win32 and follows it, and hides while Claude is in the background or minimized.
-- The run log is at `%APPDATA%\Whale Usage\logs\main.log` (tray menu: 打开日志文件夹). Attach it when reporting a problem.
+- The run log is at `%APPDATA%\Whale Usage\logs\main.log` (menu: 打开日志文件夹). Attach it when reporting a problem.
+- Right-click the character or the tray icon for the menu, styled like the Windows tray menu of [Claude Auto Pass](https://github.com/tiger-git2022/claude-auto-pass): Windows 11 acrylic, rounded corners, Fluent icons, light or dark with Windows.
 
 ### Artwork
 
-The default character comes from [MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget); per its `PROVENANCE.md`, the images are provided as-is and are not covered by its MIT license. Rights holders can open an issue to have it removed.
+Two characters come with the app, switched in the menu: 探头 from [MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget) (per its `PROVENANCE.md`, provided as-is and not covered by its MIT license), and 笑脸, cut out of a fan illustration. Rights holders can open an issue to have one removed.
 
 ## License
 

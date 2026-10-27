@@ -1,0 +1,101 @@
+/* WinUI / WPF-UI menu colors, as the Claude Auto Pass tray menu uses them. */
+:root {
+  --text: rgba(0, 0, 0, 0.896);
+  --text-disabled: rgba(0, 0, 0, 0.447);
+  --hover: rgba(0, 0, 0, 0.037);
+  --pressed: rgba(0, 0, 0, 0.024);
+  --divider: rgba(0, 0, 0, 0.0803);
+  --solid: #f9f9f9; /* without acrylic (Windows 10) */
+  --chip: rgba(0, 0, 0, 0.06);
+  --accent: #0067c0;
+  --on-accent: #fff;
+}
+
+:root.dark {
+  --text: #fff;
+  --text-disabled: rgba(255, 255, 255, 0.545);
+  --hover: rgba(255, 255, 255, 0.0605);
+  --pressed: rgba(255, 255, 255, 0.0419);
+  --divider: rgba(255, 255, 255, 0.0837);
+  --solid: #2c2c2c;
+  --chip: rgba(255, 255, 255, 0.08);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: transparent;
+  color: var(--text);
+  font: 14px "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  user-select: none;
+  overflow: hidden;
+  cursor: default;
+}
+
+:root:not(.acrylic) body { background: var(--solid); }
+
+#list {
+  display: inline-flex;
+  flex-direction: column;
+  min-width: 248px;
+  padding: 4px 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  margin: 1px 4px;
+  padding: 7px 16px 7px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  outline: none;
+}
+
+button.row:hover, button.row:focus-visible, button.row.focused { background: var(--hover); }
+button.row:active { background: var(--pressed); }
+.row:disabled, .row.header { color: var(--text-disabled); }
+.row.header { color: var(--text); font-weight: 600; }
+.row:disabled:hover { background: transparent; }
+
+.icon {
+  width: 16px;
+  margin-right: 12px;
+  font: 16px "Segoe Fluent Icons", "Segoe MDL2 Assets";
+  line-height: 1;
+  text-align: center;
+  flex: none;
+}
+
+.text { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 360px; }
+
+.check {
+  margin-left: 16px;
+  font: 12px "Segoe Fluent Icons", "Segoe MDL2 Assets";
+  visibility: hidden;
+}
+
+.row.checked .check { visibility: visible; }
+
+.separator { height: 1px; margin: 4px 0; background: var(--divider); }
+
+/* A label with a few choices beside it (size, character). */
+.chips { display: flex; gap: 4px; margin-left: 16px; }
+
+.chip {
+  padding: 2px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--chip);
+  color: inherit;
+  font: 12px "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  line-height: 18px;
+  outline: none;
+}
+
+.chip:hover, .chip:focus-visible, .chip.focused { background: var(--hover); box-shadow: inset 0 0 0 1px var(--divider); }
+.chip.selected { background: var(--accent); color: var(--on-accent); box-shadow: none; }

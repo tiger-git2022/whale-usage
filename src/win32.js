@@ -26,11 +26,14 @@ const CloseHandle = kernel32.func('bool __stdcall CloseHandle(intptr h)')
 
 const DwmGetWindowAttributeRect = dwmapi.func('int32 __stdcall DwmGetWindowAttribute(intptr hwnd, uint32 attr, _Out_ RECT *value, uint32 size)')
 const DwmGetWindowAttributeInt = dwmapi.func('int32 __stdcall DwmGetWindowAttribute(intptr hwnd, uint32 attr, _Out_ int32 *value, uint32 size)')
+const DwmSetWindowAttributeInt = dwmapi.func('int32 __stdcall DwmSetWindowAttribute(intptr hwnd, uint32 attr, int32 *value, uint32 size)')
 
 const GW_OWNER = 4
 const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 const DWMWA_EXTENDED_FRAME_BOUNDS = 9
 const DWMWA_CLOAKED = 14
+const DWMWA_WINDOW_CORNER_PREFERENCE = 33
+const DWMWCP_ROUND = 2
 
 const exeNameCache = new Map()
 
@@ -126,4 +129,10 @@ function claudeState(cached, ownPid) {
   }
 }
 
-module.exports = { claudeState, findClaudeWindow }
+// Windows 11 rounds the corners of a frameless window only when asked; Windows 10 ignores this.
+function roundCorners(handleBuffer) {
+  const hwnd = Number(handleBuffer.readBigUInt64LE(0))
+  DwmSetWindowAttributeInt(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, [DWMWCP_ROUND], 4)
+}
+
+module.exports = { claudeState, findClaudeWindow, roundCorners }
