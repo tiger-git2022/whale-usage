@@ -1,0 +1,7 @@
+{
+  "name": "whale-usage-bridge",
+  "version": "0.1.0",
+  "description": "Writes your Claude subscription usage (5-hour and weekly limits) to ~/.claude/whale/usage.json so the Whale desktop widget can show it",
+  "author": { "name": "tiger" },
+  "license": "MIT"
+}

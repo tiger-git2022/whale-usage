@@ -1,0 +1,149 @@
+:root {
+  --ink: #1f2a44;
+  --muted: #6b7591;
+  --card: #ffffff;
+  --line: rgba(31, 42, 68, 0.12);
+  --track: rgba(31, 42, 68, 0.1);
+  --five-hour: #4c7cf0;
+  --seven-day: #9b6bf2;
+  --warn: #e39a1c;
+  --bad: #e0483e;
+  --pet: 108px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  color: var(--ink);
+  user-select: none;
+}
+
+#stage {
+  position: relative;
+  height: 100%;
+}
+
+/* Character, pinned to the window's bottom-right corner (main.js relies on this). */
+#pet {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: var(--pet);
+  height: var(--pet);
+  cursor: grab;
+  animation: float 3.2s ease-in-out infinite;
+}
+
+#pet.dragging { cursor: grabbing; animation: none; }
+
+#avatar {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.35));
+  transform-origin: 50% 100%;
+  transition: transform 120ms ease-out;
+  pointer-events: none;
+}
+
+#pet:hover #avatar { transform: scale(1.04); }
+#pet.pressed #avatar { transform: scale(1.1, 0.86); transition: transform 90ms ease-out; }
+#pet.bounce #avatar { animation: q-bounce 520ms cubic-bezier(0.28, 1.6, 0.5, 1); }
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+@keyframes q-bounce {
+  0% { transform: scale(1.1, 0.86); }
+  35% { transform: scale(0.92, 1.1); }
+  60% { transform: scale(1.04, 0.97); }
+  100% { transform: scale(1, 1); }
+}
+
+/* Both windows at a glance, under the character. */
+#badges {
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 3px;
+  pointer-events: none;
+}
+
+.pill {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 16px;
+  color: #fff;
+  background: var(--five-hour);
+  border: 1.5px solid #fff;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pill[data-kind="seven_day"] { background: var(--seven-day); }
+.pill.warn { background: var(--warn); }
+.pill.bad { background: var(--bad); }
+.pill.hidden { display: none; }
+
+/* Bubble, sitting above the character. */
+#bubble {
+  position: absolute;
+  right: 10px;
+  bottom: calc(var(--pet) + 22px);
+  width: 260px;
+  padding: 12px 14px 10px;
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 8px 24px rgba(20, 30, 60, 0.25);
+  transform-origin: 85% 100%;
+  transition: opacity 160ms ease, transform 200ms cubic-bezier(0.3, 1.4, 0.5, 1);
+}
+
+#bubble::after {
+  content: "";
+  position: absolute;
+  right: 47px;
+  bottom: -6px;
+  width: 14px;
+  height: 14px;
+  background: var(--card);
+  transform: rotate(45deg);
+  border-radius: 2px;
+}
+
+#bubble.hidden { opacity: 0; transform: scale(0.85) translateY(8px); pointer-events: none; }
+
+#bubble header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.title { font-weight: 700; font-size: 14px; }
+.muted { color: var(--muted); font-size: 12px; }
+.hidden { display: none; }
+#bubble.hidden { display: block; }
+
+.row { margin: 8px 0 10px; }
+.row-top { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
+.row-top b { font-size: 17px; font-variant-numeric: tabular-nums; }
+.bar { height: 7px; margin: 5px 0 3px; border-radius: 99px; background: var(--track); overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; border-radius: 99px; background: var(--five-hour); transition: width 600ms ease, background 300ms; }
+.row[data-kind="seven_day"] .bar i { background: var(--seven-day); }
+.row .name::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--five-hour); vertical-align: 1px; }
+.row[data-kind="seven_day"] .name::before { background: var(--seven-day); }
+.row .bar i.warn { background: var(--warn); }
+.row .bar i.bad { background: var(--bad); }
+#empty { margin: 4px 0 2px; line-height: 1.5; }

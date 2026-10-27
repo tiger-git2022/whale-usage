@@ -1,0 +1,45 @@
+{
+  "name": "whale-usage-widget",
+  "productName": "Whale Usage",
+  "version": "0.1.0",
+  "description": "A desktop pet that shows your Claude subscription usage next to the Claude app",
+  "main": "src/main.js",
+  "author": "tiger",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable nsis"
+  },
+  "build": {
+    "appId": "local.whale-usage-widget",
+    "productName": "Whale Usage",
+    "files": [
+      "src/**/*",
+      "skins/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "portable": {
+      "artifactName": "WhaleUsage-${version}-portable.exe"
+    },
+    "nsis": {
+      "artifactName": "WhaleUsage-${version}-setup.exe",
+      "oneClick": true
+    },
+    "electronDist": "node_modules/electron/dist"
+  },
+  "dependencies": {
+    "koffi": "^3.3.4"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0"
+  }
+}

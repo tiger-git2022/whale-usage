@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' file: data:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>Whale Usage</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="stage">
+    <section id="bubble" class="hidden" aria-live="polite">
+      <header>
+        <span class="title">Claude 额度</span>
+        <span id="updated" class="muted"></span>
+      </header>
+      <div id="rows"></div>
+      <p id="empty" class="muted hidden">还没有数据。在 Claude 的 Code 标签页里发一条消息，额度就会出现在这里。</p>
+    </section>
+
+    <div id="pet" title="点我看额度，按住可以拖动">
+      <img id="avatar" alt="" draggable="false">
+      <div id="badges">
+        <span class="pill hidden" data-kind="five_hour"></span>
+        <span class="pill hidden" data-kind="seven_day"></span>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
