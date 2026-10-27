@@ -13,7 +13,7 @@
   },
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win portable nsis",
+    "dist": "electron-builder --win portable nsis -c.electronDist=node_modules/electron/dist",
     "test": "node --test test/*.test.js"
   },
   "build": {
@@ -37,8 +37,7 @@
     "nsis": {
       "artifactName": "WhaleUsage-v${version}-setup.exe",
       "oneClick": true
-    },
-    "electronDist": "node_modules/electron/dist"
+    }
   },
   "dependencies": {
     "koffi": "^3.3.4"
