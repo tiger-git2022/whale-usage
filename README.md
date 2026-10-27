@@ -60,7 +60,7 @@ git config --global http.https://github.com.proxy http://127.0.0.1:7890
 两种提醒都在右键菜单里单独开关，声音跟着「音效」开关。鲸鱼藏起来的时候（Claude 不在前台）看不到气泡，但声音照样会响。
 
 - **等我回答或批准时提醒**：Claude 问你问题、等你批准某个操作或确认计划时，鲸鱼响一声并冒出带橙色边的气泡，你回答或批准后自动消失。几个会话同时在等时会写出还有几个。点气泡可以先收起来，下次有新的等待会再提醒。
-- **每轮结束提示用了多少额度**：一轮对话结束时，鲸鱼响一声并显示这轮让额度涨了多少，比如蓝色 `+2%`（5 小时）和紫色 `+1%`（本周）。额度只精确到 1%，两个都没涨就什么也不显示、不响。
+- **每轮结束提示用了多少额度**：一轮对话结束时，鲸鱼响一声并显示这轮让额度涨了多少，比如蓝色 `+2%`（5 小时）和紫色 `+1%`（本周）。额度只精确到 1%，两个都没涨就什么也不显示、不响。气泡停留 20 秒，鼠标放在上面时不消失，点一下就收起。只统计 Claude Code 里的对话，普通聊天和 Cowork 的对话插件看不到。
 
 这两个提醒需要插件 0.2.0 或更新的版本。以前装过插件的话，在 Claude 的插件管理里把 `whale-usage-bridge` 更新一下。
 
@@ -112,7 +112,7 @@ If adding the marketplace says it cannot connect, Claude cannot reach GitHub: it
 Both have their own switch in the right-click menu; their sounds follow the 音效 (sound) switch. While the character is hidden (Claude in the background) the bubble cannot be seen, but the sound still plays.
 
 - **Waiting for you (等我回答或批准时提醒)**: when Claude asks you a question, waits for a permission or a plan approval, the character chimes and shows an orange-edged bubble until you answer. It says how many other sessions are waiting too. Click the bubble to put it away until the next wait.
-- **End of turn (每轮结束提示用了多少额度)**: when a turn ends, the character chimes and shows how much it used, such as a blue `+2%` (5-hour) and a purple `+1%` (weekly). Usage is reported in whole percents; a turn that moved neither shows and plays nothing.
+- **End of turn (每轮结束提示用了多少额度)**: when a turn ends, the character chimes and shows how much it used, such as a blue `+2%` (5-hour) and a purple `+1%` (weekly). Usage is reported in whole percents; a turn that moved neither shows and plays nothing. The bubble stays for 20 seconds, stays put while the pointer is on it, and goes away on a click. Only Claude Code conversations count; the plugin cannot see Chat or Cowork conversations.
 
 Both need plugin 0.2.0 or later; if you installed the plugin before, update `whale-usage-bridge` in Claude's plugin settings.
 

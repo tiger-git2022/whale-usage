@@ -10,7 +10,7 @@ const LABELS = { five_hour: '5 小时', seven_day: '本周', spend_limit: '消�
 const ORDER = ['five_hour', 'seven_day', 'spend_limit']
 const ALERT_AT = [80, 95]
 const AUTO_HIDE_MS = 7000
-const TURN_NOTE_MS = 6000
+const TURN_NOTE_MS = 20000 // how long a finished-turn note stays; the pointer on it holds it
 
 let usage = null
 let soundOn = true
@@ -205,6 +205,9 @@ function bounce() {
 
 let noteKind = null // 'wait' or 'turn' while the note shows
 let noteTimer = null
+let noteLeft = 0 // ms the note has left to show; 0 when it stays until answered
+let noteDeadline = 0
+let overNote = false
 let dismissedWait = null // the wait the person closed; it stays closed until another one opens
 
 function el(tag, className, text) {
@@ -221,7 +224,23 @@ function showNote(kind, children, ms) {
   note.className = kind
   noteKind = kind
   clearTimeout(noteTimer)
-  if (ms) noteTimer = setTimeout(hideNote, ms)
+  noteLeft = ms ?? 0
+  if (noteLeft && !overNote) startNoteTimer()
+}
+
+function startNoteTimer() {
+  noteDeadline = Date.now() + noteLeft
+  noteTimer = setTimeout(hideNote, noteLeft)
+}
+
+// The pointer on the note holds it; leaving runs the rest of its time
+function holdNote(over) {
+  if (over === overNote) return
+  overNote = over
+  if (!noteKind || !noteLeft) return
+  clearTimeout(noteTimer)
+  if (over) noteLeft = Math.max(noteDeadline - Date.now(), 0)
+  else startNoteTimer()
 }
 
 function hideNote({ dismiss = false } = {}) {
@@ -327,12 +346,14 @@ document.addEventListener('mousemove', e => {
         (!bubble.classList.contains('hidden') && bubble.contains(el)) ||
         (noteKind && note.contains(el))),
   )
+  holdNote(Boolean(el && noteKind && note.contains(el)))
   if (over !== overPet || press) {
     overPet = over || Boolean(press)
     window.whale.mouseOverPet(overPet)
   }
 })
 document.addEventListener('mouseleave', () => {
+  holdNote(false)
   if (press) return
   overPet = false
   window.whale.mouseOverPet(false)
