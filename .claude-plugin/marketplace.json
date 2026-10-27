@@ -1,11 +1,13 @@
 {
   "name": "whale-usage",
-  "owner": { "name": "tiger" },
+  "owner": {
+    "name": "tiger"
+  },
   "plugins": [
     {
       "name": "whale-usage-bridge",
       "source": "./plugin",
-      "description": "Writes your Claude subscription usage to ~/.claude/whale/usage.json for the Whale Usage desktop widget"
+      "description": "Shares your Claude subscription usage and waiting questions or approvals with the Whale Usage desktop widget"
     }
   ]
 }

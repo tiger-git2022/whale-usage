@@ -5,6 +5,7 @@ const path = require('path')
 const { pathToFileURL } = require('url')
 const log = require('./log')
 const menu = require('./menu')
+const sessions = require('./sessions')
 const updater = require('./updater')
 const { claudeState } = require('./win32')
 
@@ -32,6 +33,8 @@ const DEFAULTS = {
   scale: 0.7,
   showWhen: 'front', // 'front': only while Claude is the active window; 'open': whenever Claude is not minimized
   sound: true,
+  notifyWait: true, // bubble and sound when a session waits for an answer or an approval
+  notifyTurn: true, // bubble and sound when a turn ends having used at least 1% of a window
   skin: 'peek', // one of SKINS, or 'custom' for customSkin
   customSkin: null, // a picture the person chose, copied into the app's data folder
   autoUpdate: true, // check for a new release at start and every few hours
@@ -43,6 +46,7 @@ const usagePath = () =>
   process.env.CLAUDE_CONFIG_DIR
     ? path.join(process.env.CLAUDE_CONFIG_DIR, 'whale', 'usage.json')
     : path.join(os.homedir(), '.claude', 'whale', 'usage.json')
+const sessionsDir = () => path.join(path.dirname(usagePath()), 'sessions')
 // The bundled characters, each skins/<id>/character.png: square, transparent, cropped at the right
 // and bottom edges so it peeks in from the corner.
 const SKINS = [
@@ -233,6 +237,8 @@ function openMenu(at) {
     { type: 'item', id: 'skin:pick', icon: 'EB9F', text: '用自己的图片…' },
     { type: 'item', id: 'reset', icon: 'E7A7', text: '重置位置' },
     { type: 'separator' },
+    { type: 'item', id: 'notify:wait', icon: 'EA8F', text: '等我回答或批准时提醒', checked: settings.notifyWait },
+    { type: 'item', id: 'notify:turn', icon: 'E930', text: '每轮结束提示用了多少额度', checked: settings.notifyTurn },
     { type: 'item', id: 'sound', icon: 'E767', text: '音效', checked: settings.sound },
     { type: 'item', id: 'autostart', icon: 'E7E8', text: '开机自启', checked: autoStart },
     { type: 'item', id: 'autoupdate', icon: 'E895', text: '自动检查更新', checked: settings.autoUpdate },
@@ -258,6 +264,11 @@ function openMenu(at) {
       setSetting('sound', !settings.sound)
       sendConfig()
     },
+    'notify:wait': () => {
+      setSetting('notifyWait', !settings.notifyWait)
+      scanSessions()
+    },
+    'notify:turn': () => setSetting('notifyTurn', !settings.notifyTurn),
     autostart: () => app.setLoginItemSettings({ openAtLogin: !autoStart }),
     autoupdate: () => setSetting('autoUpdate', !settings.autoUpdate),
     check: () => checkUpdates({ manual: true }),
@@ -398,6 +409,41 @@ function watchUsage() {
   fs.watchFile(file, { interval: 1500 }, sendUsage)
 }
 
+// Session states from the plugin: open waits keep a bubble up, new ones and finished turns also make a sound.
+const sessionTracker = sessions.createTracker()
+
+function scanSessions() {
+  if (!win || win.isDestroyed()) return
+  const { active, newWaits, newTurns } = sessions.track(sessionTracker, sessions.read(sessionsDir()))
+  for (const wait of newWaits) log.info('session waiting', wait.session, wait.kind, wait.tool)
+  for (const turn of newTurns) log.info('turn finished', turn.session, JSON.stringify(turn.deltas))
+  win.webContents.send('waits', { active: settings.notifyWait ? active : [], fresh: settings.notifyWait && newWaits.length > 0 })
+  if (settings.notifyTurn && newTurns.length > 0) win.webContents.send('turn', newTurns[newTurns.length - 1].deltas)
+}
+
+function watchSessions() {
+  const dir = sessionsDir()
+  fs.mkdirSync(dir, { recursive: true })
+  try {
+    sessions.removeOld(dir)
+  } catch (err) {
+    log.warn('could not clean old session files', err.message)
+  }
+  let soon = null
+  try {
+    fs.watch(dir, () => {
+      soon ??= setTimeout(() => {
+        soon = null
+        scanSessions()
+      }, 120)
+    })
+  } catch (err) {
+    log.warn('could not watch the sessions folder, polling only', err.message)
+  }
+  // Also look every few seconds, in case a change notice is missed and so stale waits expire
+  setInterval(scanSessions, 3000)
+}
+
 function createWindow() {
   const d = dims()
   win = new BrowserWindow({
@@ -419,6 +465,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Reminder sounds must play while the window is hidden (Claude not in front)
+      backgroundThrottling: false,
     },
   })
   win.setAlwaysOnTop(true, 'floating')
@@ -428,6 +476,7 @@ function createWindow() {
     win.webContents.setZoomFactor(settings.scale)
     sendConfig()
     sendUsage()
+    scanSessions()
     if (process.env.WHALE_FORCE_SHOW === '1') setTimeout(() => win.webContents.send('show-bubble'), 800)
   })
 }
@@ -484,6 +533,7 @@ if (!app.requestSingleInstanceLock()) {
     tray.on('right-click', () => openMenu())
     rebuildTray()
     watchUsage()
+    watchSessions()
     setInterval(tick, TICK_MS)
     scheduleUpdateChecks()
   })

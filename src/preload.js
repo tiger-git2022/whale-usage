@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('whale', {
   onUsage: fn => ipcRenderer.on('usage', (_e, usage) => fn(usage)),
   onConfig: fn => ipcRenderer.on('config', (_e, config) => fn(config)),
   onShowBubble: fn => ipcRenderer.on('show-bubble', () => fn()),
+  onWaits: fn => ipcRenderer.on('waits', (_e, waits) => fn(waits)),
+  onTurn: fn => ipcRenderer.on('turn', (_e, deltas) => fn(deltas)),
   mouseOverPet: over => ipcRenderer.send('mouse-over-pet', over),
   dragStart: () => ipcRenderer.send('drag-start'),
   dragMove: () => ipcRenderer.send('drag-move'),

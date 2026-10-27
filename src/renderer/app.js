@@ -4,11 +4,13 @@ const bubble = document.getElementById('bubble')
 const rows = document.getElementById('rows')
 const empty = document.getElementById('empty')
 const updated = document.getElementById('updated')
+const note = document.getElementById('note')
 
 const LABELS = { five_hour: '5 小时', seven_day: '本周', spend_limit: '消费上限' }
 const ORDER = ['five_hour', 'seven_day', 'spend_limit']
 const ALERT_AT = [80, 95]
 const AUTO_HIDE_MS = 7000
+const TURN_NOTE_MS = 6000
 
 let usage = null
 let soundOn = true
@@ -116,6 +118,7 @@ function render() {
 // ---------- bubble ----------
 
 function showBubble({ pin = false } = {}) {
+  hideNote({ dismiss: true })
   render()
   bubble.classList.remove('hidden')
   clearTimeout(hideTimer)
@@ -162,11 +165,121 @@ function pop(high) {
   osc.stop(t + 0.13)
 }
 
+// A tone for the reminders, starting `at` seconds from now
+function tone(freq, at, length, type = 'sine', volume = 0.14) {
+  const t = audio.currentTime + at
+  const osc = audio.createOscillator()
+  const gain = audio.createGain()
+  osc.type = type
+  osc.frequency.setValueAtTime(freq, t)
+  gain.gain.setValueAtTime(0.0001, t)
+  gain.gain.exponentialRampToValueAtTime(volume, t + 0.012)
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + length)
+  osc.connect(gain).connect(audio.destination)
+  osc.start(t)
+  osc.stop(t + length + 0.02)
+}
+
+// 'done': two rising notes when a turn ends. 'wait': two short beeps and a higher one, to get attention.
+function chime(kind) {
+  if (!soundOn) return
+  audio ??= new AudioContext()
+  if (audio.state === 'suspended') audio.resume()
+  if (kind === 'done') {
+    tone(784, 0.02, 0.35)
+    tone(1047, 0.14, 0.55)
+  } else {
+    tone(988, 0.02, 0.12, 'triangle')
+    tone(988, 0.18, 0.12, 'triangle')
+    tone(1319, 0.34, 0.3, 'triangle')
+  }
+}
+
 function bounce() {
   pet.classList.remove('bounce')
   void pet.offsetWidth
   pet.classList.add('bounce')
 }
+
+// ---------- reminders ----------
+
+let noteKind = null // 'wait' or 'turn' while the note shows
+let noteTimer = null
+let dismissedWait = null // the wait the person closed; it stays closed until another one opens
+
+function el(tag, className, text) {
+  const node = document.createElement(tag)
+  if (className) node.className = className
+  if (text !== undefined) node.textContent = text
+  return node
+}
+
+function showNote(kind, children, ms) {
+  bubble.classList.add('hidden')
+  pinned = false
+  note.replaceChildren(...children)
+  note.className = kind
+  noteKind = kind
+  clearTimeout(noteTimer)
+  if (ms) noteTimer = setTimeout(hideNote, ms)
+}
+
+function hideNote({ dismiss = false } = {}) {
+  if (dismiss && noteKind === 'wait') dismissedWait = note.dataset.key
+  clearTimeout(noteTimer)
+  note.className = 'hidden'
+  noteKind = null
+}
+
+function waitLines(wait, others) {
+  const [title, detail] =
+    wait.kind === 'question' ? ['Claude 在等你回答问题', '']
+    : wait.tool === 'ExitPlanMode' ? ['Claude 在等你确认计划', '']
+    : ['Claude 在等你批准', wait.tool ? `要用 ${wait.tool}` : '']
+  const lines = [el('b', '', title)]
+  if (detail) lines.push(el('span', 'muted', detail))
+  if (others > 0) lines.push(el('span', 'muted', `还有 ${others} 个会话也在等你`))
+  return lines
+}
+
+// Open waits from every session, newest last; `fresh` when one just opened.
+function onWaits({ active, fresh }) {
+  const wait = active[active.length - 1]
+  if (!wait) {
+    dismissedWait = null
+    if (noteKind === 'wait') hideNote()
+    return
+  }
+  const key = `${wait.session}:${wait.since}`
+  if (fresh) {
+    chime('wait')
+    bounce()
+  }
+  if (key === dismissedWait) return
+  if (noteKind === 'wait' && note.dataset.key === key) return
+  // An old wait does not cover the usage bubble the person opened
+  if (!fresh && pinned && !bubble.classList.contains('hidden')) return
+  note.dataset.key = key
+  showNote('wait', waitLines(wait, active.length - 1))
+}
+
+// A finished turn that used at least 1% of a window
+function onTurn(deltas) {
+  chime('done')
+  bounce()
+  if (noteKind === 'wait') return // the wait matters more
+  const children = [el('span', '', '回复完了，这轮用了')]
+  for (const kind of ORDER) {
+    if (!(deltas[kind] > 0)) continue
+    const chip = el('span', 'delta', `+${deltas[kind]}%`)
+    chip.dataset.kind = kind
+    chip.title = LABELS[kind] ?? kind
+    children.push(chip)
+  }
+  showNote('turn', children, TURN_NOTE_MS)
+}
+
+note.addEventListener('click', () => hideNote({ dismiss: true }))
 
 // ---------- pointer: click, press, drag ----------
 
@@ -208,7 +321,12 @@ pet.addEventListener('pointerup', () => {
 let overPet = false
 document.addEventListener('mousemove', e => {
   const el = document.elementFromPoint(e.clientX, e.clientY)
-  const over = Boolean(el && (pet.contains(el) || (!bubble.classList.contains('hidden') && bubble.contains(el))))
+  const over = Boolean(
+    el &&
+      (pet.contains(el) ||
+        (!bubble.classList.contains('hidden') && bubble.contains(el)) ||
+        (noteKind && note.contains(el))),
+  )
   if (over !== overPet || press) {
     overPet = over || Boolean(press)
     window.whale.mouseOverPet(overPet)
@@ -256,5 +374,7 @@ window.whale.onUsage(next => {
 })
 
 window.whale.onShowBubble(() => showBubble({ pin: true }))
+window.whale.onWaits(onWaits)
+window.whale.onTurn(onTurn)
 
 setInterval(render, 30000)

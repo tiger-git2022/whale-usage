@@ -45,13 +45,22 @@
 | 单击形象 | 打开或关闭额度气泡 |
 | 按住拖动 | 移动位置，会记住它相对 Claude 窗口的位置；靠近窗口左右边缘会自动吸附 |
 | 在形象上滚动滚轮 | 放大或缩小 |
-| 右键形象或托盘图标 | 打开菜单：显示时机、大小、切换形象、用自己的图片、重置位置、音效、开机自启、检查更新、打开日志、退出 |
+| 右键形象或托盘图标 | 打开菜单：显示时机、大小、切换形象、用自己的图片、重置位置、两种提醒、音效、开机自启、检查更新、打开日志、退出 |
 
 额度只在使用 Claude Code（桌面 App 的 Code 标签页或终端）时刷新，不用的时候显示最后一次的数字和重置倒计时。
 
+### 提醒
+
+两种提醒都在右键菜单里单独开关，声音跟着「音效」开关。鲸鱼藏起来的时候（Claude 不在前台）看不到气泡，但声音照样会响。
+
+- **等我回答或批准时提醒**：Claude 问你问题、等你批准某个操作或确认计划时，鲸鱼响一声并冒出带橙色边的气泡，你回答或批准后自动消失。几个会话同时在等时会写出还有几个。点气泡可以先收起来，下次有新的等待会再提醒。
+- **每轮结束提示用了多少额度**：一轮对话结束时，鲸鱼响一声并显示这轮让额度涨了多少，比如蓝色 `+2%`（5 小时）和紫色 `+1%`（本周）。额度只精确到 1%，两个都没涨就什么也不显示、不响。
+
+这两个提醒需要插件 0.2.0 或更新的版本。以前装过插件的话，在 Claude 的插件管理里把 `whale-usage-bridge` 更新一下。
+
 ### 工作原理
 
-- `plugin/`：`whale-usage-bridge` 插件。Claude Code 每次回复后都会报告当前额度，插件把它写进 `~/.claude/whale/usage.json`。用的是官方插件接口，不读取任何登录凭证。
+- `plugin/`：`whale-usage-bridge` 插件。Claude Code 每次回复后都会报告当前额度，插件把它写进 `~/.claude/whale/usage.json`；每个会话是否在等你、上一轮让额度涨了多少，写进 `~/.claude/whale/sessions/<会话 id>.json`。用的是官方插件接口，不读取任何登录凭证，也不记录对话内容。
 - `src/`：Electron 桌面程序。读取这个文件并显示；通过 Win32 接口找到 Claude 窗口并跟随它，Claude 不在前台或最小化时自动隐藏。
 - 运行日志在 `%APPDATA%\Whale Usage\logs\main.log`，托盘菜单「打开日志文件夹」可以直接打开。出问题时请附上这个文件。
 
@@ -90,6 +99,15 @@ A desktop pet that sits next to the Claude desktop app and shows your Claude sub
 
 Send Claude a message and the usage appears.
 
+### Reminders
+
+Both have their own switch in the right-click menu; their sounds follow the 音效 (sound) switch. While the character is hidden (Claude in the background) the bubble cannot be seen, but the sound still plays.
+
+- **Waiting for you (等我回答或批准时提醒)**: when Claude asks you a question, waits for a permission or a plan approval, the character chimes and shows an orange-edged bubble until you answer. It says how many other sessions are waiting too. Click the bubble to put it away until the next wait.
+- **End of turn (每轮结束提示用了多少额度)**: when a turn ends, the character chimes and shows how much it used, such as a blue `+2%` (5-hour) and a purple `+1%` (weekly). Usage is reported in whole percents; a turn that moved neither shows and plays nothing.
+
+Both need plugin 0.2.0 or later; if you installed the plugin before, update `whale-usage-bridge` in Claude's plugin settings.
+
 ### Download and updates
 
 - Every push to `main` is built by GitHub Actions and published as a new numbered [release](https://github.com/tiger-git2022/whale-usage/releases) such as `v0.1.0-t3`: the base version, then a build number that grows with each release. Earlier releases stay, and each lists the changes since the one before.
@@ -98,7 +116,7 @@ Send Claude a message and the usage appears.
 
 ### How it works
 
-- `plugin/`: after each Claude Code response, the plugin writes the reported rate-limit usage to `~/.claude/whale/usage.json`, through the official plugin API, without reading any credentials.
+- `plugin/`: after each Claude Code response, the plugin writes the reported rate-limit usage to `~/.claude/whale/usage.json`, and whether each session is waiting for you and how much its last turn used to `~/.claude/whale/sessions/<session id>.json`, through the official plugin API, without reading any credentials or recording the conversation.
 - `src/`: the Electron app shows that file, finds the Claude window through Win32 and follows it, and hides while Claude is in the background or minimized.
 - The run log is at `%APPDATA%\Whale Usage\logs\main.log` (menu: 打开日志文件夹). Attach it when reporting a problem.
 - Right-click the character or the tray icon for the menu, styled like the Windows tray menu of [Claude Auto Pass](https://github.com/tiger-git2022/claude-auto-pass): Windows 11 acrylic, rounded corners, Fluent icons, light or dark with Windows.

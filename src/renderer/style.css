@@ -147,3 +147,51 @@ html, body {
 .row .bar i.warn { background: var(--warn); }
 .row .bar i.bad { background: var(--bad); }
 #empty { margin: 4px 0 2px; line-height: 1.5; }
+
+/* A short reminder in the bubble's place: Claude is waiting, or how much a turn used. */
+#note {
+  position: absolute;
+  right: 10px;
+  bottom: calc(var(--pet) + 22px);
+  max-width: 250px;
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 8px 24px rgba(20, 30, 60, 0.25);
+  font-size: 13px;
+  line-height: 1.45;
+  transform-origin: 85% 100%;
+  transition: opacity 160ms ease, transform 200ms cubic-bezier(0.3, 1.4, 0.5, 1);
+}
+
+#note::after {
+  content: "";
+  position: absolute;
+  right: 47px;
+  bottom: -6px;
+  width: 14px;
+  height: 14px;
+  background: var(--card);
+  transform: rotate(45deg);
+  border-radius: 2px;
+}
+
+#note.hidden { display: block; opacity: 0; transform: scale(0.85) translateY(8px); pointer-events: none; }
+#note b { font-weight: 700; }
+#note .muted { display: block; }
+#note.wait { box-shadow: 0 0 0 2px var(--warn), 0 8px 24px rgba(20, 30, 60, 0.25); }
+
+.delta {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  color: #fff;
+  background: var(--five-hour);
+  font-variant-numeric: tabular-nums;
+}
+
+.delta[data-kind="seven_day"] { background: var(--seven-day); }
