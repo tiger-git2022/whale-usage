@@ -32,6 +32,12 @@
 
 装好以后，在 Claude 里发一条消息，额度就会出现。
 
+添加时如果提示「无法连接到市场」，是 Claude App 连不上 GitHub：它下载插件时用的是 git，不走系统代理。开着代理的话，让 git 访问 GitHub 时走代理就行（端口换成你自己代理的）：
+
+```
+git config --global http.https://github.com.proxy http://127.0.0.1:7890
+```
+
 ### 下载与更新
 
 - 每次推送 `main` 都会由 GitHub Actions 打包，并发布一个带编号的新版本（[发布页](https://github.com/tiger-git2022/whale-usage/releases)）。版本号形如 `v0.1.0-t3`：前半部分是基础版本，`t` 后面的数字每次发布加一。旧版本都保留，每个版本附上距上一版的更新内容。
@@ -98,6 +104,8 @@ A desktop pet that sits next to the Claude desktop app and shows your Claude sub
 2. **The `whale-usage-bridge` plugin** in Claude, which hands the usage to the app. In the Claude desktop app: **+** next to the prompt box → **Plugins** → **Add marketplace** `tiger-git2022/whale-usage`, then add `whale-usage-bridge`. In a terminal: `/plugin install whale-usage-bridge --marketplace tiger-git2022/whale-usage`.
 
 Send Claude a message and the usage appears.
+
+If adding the marketplace says it cannot connect, Claude cannot reach GitHub: it fetches plugins with git, which ignores the system proxy. With a proxy running, point git at it for GitHub (use your proxy's port): `git config --global http.https://github.com.proxy http://127.0.0.1:7890`.
 
 ### Reminders
 

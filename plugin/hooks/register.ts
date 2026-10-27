@@ -73,14 +73,12 @@ async function startWait($: EngineInterface, s: Session, key: string, kind: Wait
   await saveSession($, s)
 }
 
-// Ends the waits of a call that finished: its own (a question, a plan), else the oldest permission
-// request for the same tool (a request carries no call id), and a permission notice, which names no tool.
+// Ends the waits of a call that finished: its own (a question, a plan), the oldest permission request
+// for the same tool (a request carries no call id), and a permission notice, which names no tool.
 async function endWait($: EngineInterface, s: Session, key: string, tool: string) {
   let changed = s.waits.delete(key)
-  if (!changed) {
-    const request = [...s.waits].find(([k, w]) => k.startsWith('request:') && w.tool === tool)
-    if (request) changed = s.waits.delete(request[0])
-  }
+  const request = [...s.waits].find(([k, w]) => k.startsWith('request:') && w.tool === tool)
+  if (request && s.waits.delete(request[0])) changed = true
   if (s.waits.delete(NOTICE_KEY)) changed = true
   if (changed) await saveSession($, s)
 }
@@ -118,8 +116,10 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // A permission dialog is about to be shown for a call
+  // A permission dialog is about to be shown for a call. The desktop app asks this for questions and
+  // plans too; those already wait as what they are (tool.call below).
   on('classic.PermissionRequest', async ($, e, next) => {
+    if (QUESTION_TOOLS.has(e.tool_name) || PLAN_TOOLS.has(e.tool_name)) return next(e)
     s.requests += 1
     await startWait($, s, `request:${s.requests}`, 'approval', e.tool_name)
     return next(e)
