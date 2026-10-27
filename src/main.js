@@ -7,7 +7,9 @@ const log = require('./log')
 const menu = require('./menu')
 const sessions = require('./sessions')
 const updater = require('./updater')
+const webusage = require('./webusage')
 const composer = require('./composer')
+const limits = require('./limits')
 const { claudeState } = require('./win32')
 
 // The widget window at 100% size: the character sits at its bottom-right, the bubble above it.
@@ -190,16 +192,44 @@ function anchorFromDrop(bounds) {
   return { anchor: { dx: Math.round(petRight - right), dy: Math.round(petBottom - (c.y + c.height)) } }
 }
 
+let lastUsageText = null
+
+// The plugin's file merged with what claude.ai answered, when signed in there
 function sendUsage() {
   if (!win || win.isDestroyed()) return
-  let usage = null
+  let file = null
   try {
-    usage = JSON.parse(fs.readFileSync(usagePath(), 'utf8'))
-    log.info('usage', (usage.limits || []).map(l => `${l.kind} ${l.percentUsed}%`).join(', '))
+    file = JSON.parse(fs.readFileSync(usagePath(), 'utf8'))
   } catch (err) {
     if (err.code !== 'ENOENT') log.warn('could not read usage file', err.message)
   }
+  const usage = limits.merge(file, webusage.latest())
+  const text = (usage?.limits || []).map(l => `${l.kind} ${Math.round(l.percentUsed)}%`).join(', ')
+  if (text !== lastUsageText) log.info('usage', text)
+  lastUsageText = text
   win.webContents.send('usage', usage)
+}
+
+function webUsageEntry() {
+  const state = webusage.state()
+  if (state === 'signed-in') return { type: 'item', id: 'web:logout', icon: 'E774', text: '从 claude.ai 读取全部额度', checked: true }
+  // Usually claude.ai's security check has expired; its page in the window renews it and closes
+  if (state === 'error') return { type: 'item', id: 'web:login', icon: 'E774', text: 'claude.ai 额度暂时读不到，点此重新打开…' }
+  return { type: 'item', id: 'web:login', icon: 'E774', text: '登录 claude.ai，读取全部额度…' }
+}
+
+async function confirmLogout() {
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    title: '从 claude.ai 读取额度',
+    message: '退出 claude.ai 登录？',
+    detail: '退出后额度只来自 Claude Code 插件，普通聊天和 Cowork 用掉的额度要等下次在 Claude Code 里收到回复时才更新。',
+    buttons: ['退出登录', '取消'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  })
+  if (response === 0) webusage.logout()
 }
 
 function sendConfig() {
@@ -257,6 +287,8 @@ function openMenu(at) {
     { type: 'item', id: 'snap', icon: 'E718', text: '贴着输入框', checked: settings.snapToBox },
     { type: 'item', id: 'reset', icon: 'E7A7', text: '重置位置' },
     { type: 'separator' },
+    webUsageEntry(),
+    { type: 'separator' },
     { type: 'item', id: 'notify:wait', icon: 'EA8F', text: '等我回答或批准时提醒', checked: settings.notifyWait },
     { type: 'item', id: 'notify:turn', icon: 'E930', text: '每轮结束提示用了多少额度', checked: settings.notifyTurn },
     { type: 'item', id: 'sound', icon: 'E767', text: '音效', checked: settings.sound },
@@ -295,6 +327,8 @@ function openMenu(at) {
       scanSessions()
     },
     'notify:turn': () => setSetting('notifyTurn', !settings.notifyTurn),
+    'web:login': () => webusage.login(),
+    'web:logout': confirmLogout,
     autostart: () => app.setLoginItemSettings({ openAtLogin: !autoStart }),
     autoupdate: () => setSetting('autoUpdate', !settings.autoUpdate),
     check: () => checkUpdates({ manual: true }),
@@ -579,6 +613,7 @@ if (finishing) {
     tray.on('right-click', () => openMenu())
     rebuildTray()
     watchUsage()
+    webusage.start(sendUsage)
     watchSessions()
     setInterval(tick, TICK_MS)
     scheduleUpdateChecks()

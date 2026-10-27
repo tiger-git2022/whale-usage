@@ -57,6 +57,14 @@ git config --global http.https://github.com.proxy http://127.0.0.1:7890
 
 额度只在使用 Claude Code（桌面 App 的 Code 标签页或终端）时刷新，不用的时候显示最后一次的数字和重置倒计时。
 
+#### 读取全部对话的额度（可选）
+
+插件只看得到 Claude Code 里的对话；普通聊天、Cowork、网页和手机上用掉的额度，要等下次在 Claude Code 里收到回复时才更新。想实时看到，右键菜单点「登录 claude.ai，读取全部额度…」，在弹出的 claude.ai 窗口里登录一次（建议用邮箱登录，Google 登录在内嵌窗口里可能被拒绝）。之后鲸鱼每分钟向 claude.ai 查一次额度，和插件的数字合并：同一个额度窗口里取较大的那个。
+
+- 登录状态只存在鲸鱼自己的浏览器存储里（`%APPDATA%\Whale Usage\Partitions\claude-ai`），不读取 Claude App 的登录信息，密码也不经过鲸鱼的代码。
+- claude.ai 前面有 Cloudflare 安全验证，第一次打开窗口时可能要等几秒。验证过期后菜单会显示「claude.ai 额度暂时读不到」，点一下重新打开窗口，验证通过后窗口会自动关掉。
+- 不想用了，在菜单里点「从 claude.ai 读取全部额度」退出登录。
+
 ### 提醒
 
 两种提醒都在右键菜单里单独开关，声音跟着「音效」开关。鲸鱼藏起来的时候（Claude 不在前台）看不到气泡，但声音照样会响。
@@ -108,6 +116,10 @@ A desktop pet that sits next to the Claude desktop app and shows your Claude sub
 Send Claude a message and the usage appears.
 
 If adding the marketplace says it cannot connect, Claude cannot reach GitHub: it fetches plugins with git, which ignores the system proxy. With a proxy running, point git at it for GitHub (use your proxy's port): `git config --global http.https://github.com.proxy http://127.0.0.1:7890`.
+
+### Usage from every conversation (optional)
+
+The plugin only sees Claude Code conversations; usage from Chat, Cowork, the web or the phone shows up the next time a Claude Code reply arrives. To see it right away, choose 登录 claude.ai，读取全部额度… in the menu and sign in once in the claude.ai window that opens (email sign-in is the safe choice; Google may refuse an embedded window). The app then asks claude.ai for the usage every minute and merges it with the plugin's numbers, keeping the higher reading within a window. The sign-in lives in the app's own browser storage (`%APPDATA%\Whale Usage\Partitions\claude-ai`); nothing is read from the Claude app and no password passes through the app's code. When claude.ai's Cloudflare check expires the menu says 暂时读不到; clicking it reopens the window, which closes itself once the check passes.
 
 ### Position
 
