@@ -89,10 +89,31 @@ function launchAndQuit(file, args = []) {
   app.quit()
 }
 
+// The portable exe stays locked while this copy runs (its launcher keeps it open), so a small script
+// waits for it to close, moves the new exe over it and starts it. ping is the delay because timeout
+// does not work without a console.
+function swapScript(fresh, target) {
+  return [
+    '@echo off',
+    'chcp 65001 >nul',
+    `set "SRC=${fresh}"`,
+    `set "DST=${target}"`,
+    'for /l %%i in (1,1,120) do (',
+    '  move /y "%SRC%" "%DST%" >nul 2>&1 && goto started',
+    '  ping -n 2 127.0.0.1 >nul',
+    ')',
+    'exit /b 1',
+    ':started',
+    'start "" "%DST%"',
+    '(goto) 2>nul & del "%~f0"',
+    '',
+  ].join('\r\n')
+}
+
 /**
  * Downloads the update and replaces this copy:
- * - portable: the running exe can be renamed but not deleted, so it becomes "<name>.old" (removed on
- *   the next start) and the new exe takes its name;
+ * - portable: the new exe is saved beside this one, and once this copy quits a script moves it over
+ *   the old exe and starts it;
  * - installed: the one-click installer runs, replaces the app and starts it again.
  */
 async function installUpdate(update, onProgress) {
@@ -104,11 +125,12 @@ async function installUpdate(update, onProgress) {
   if (portable) {
     const fresh = `${portable}.new`
     await download(asset.url, fresh, onProgress)
-    const old = `${portable}.old`
-    fs.rmSync(old, { force: true })
-    fs.renameSync(portable, old)
-    fs.renameSync(fresh, portable)
-    launchAndQuit(portable)
+    const script = path.join(os.tmpdir(), `whale-usage-update-${Date.now()}.cmd`)
+    fs.writeFileSync(script, swapScript(fresh, portable), 'utf8')
+    log.info('replacing', portable, 'after quitting, via', script)
+    app.releaseSingleInstanceLock()
+    spawn('cmd.exe', ['/c', script], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+    app.quit()
   } else {
     const installer = path.join(os.tmpdir(), asset.name)
     await download(asset.url, installer, onProgress)
@@ -116,11 +138,11 @@ async function installUpdate(update, onProgress) {
   }
 }
 
-/** Removes what a portable update left behind. */
+/** Removes what an interrupted portable update left behind. */
 function cleanUpAfterUpdate() {
   const portable = portableFile()
   if (!portable) return
-  for (const leftover of [`${portable}.old`, `${portable}.new`]) {
+  for (const leftover of [`${portable}.new`]) {
     try {
       if (fs.existsSync(leftover)) {
         fs.rmSync(leftover, { force: true })
