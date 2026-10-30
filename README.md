@@ -40,7 +40,7 @@ git config --global http.https://github.com.proxy http://127.0.0.1:7890
 
 ### 下载与更新
 
-- 每次推送 `main` 都会由 GitHub Actions 打包，并发布一个带编号的新版本（[发布页](https://github.com/tiger-git2022/whale-usage/releases)）。版本号形如 `v0.1.0-t3`：前半部分是基础版本，`t` 后面的数字每次发布加一。旧版本都保留，每个版本附上距上一版的更新内容。
+- 每次推送 `main` 都会由 GitHub Actions 打包，并发布一个带编号的新版本（[发布页](https://github.com/tiger-git2022/whale-usage/releases)）。版本号形如 `v0.1.0-t013`：前半部分是基础版本，`t` 后面的三位数字每次发布加一（补足三位，发布页才会按新旧排序）。旧版本都保留，每个版本附上距上一版的更新内容。
 - 程序启动时和之后每 6 小时检查一次更新，有新版本就直接在后台下载，下载完自动退出、替换原来的 exe 文件并重新打开，前后只要几秒，会弹通知告诉你。右键菜单里可以关掉「自动更新」，也可以随时点「检查更新」立刻更新。
 - 检查更新读取的是最新版附带的 `update.json`，读不到才用 GitHub API，不受 API 每小时 60 次的限制。
 
@@ -136,7 +136,7 @@ Both need plugin 0.2.0 or later; if you installed the plugin before, update `wha
 
 ### Download and updates
 
-- Every push to `main` is built by GitHub Actions and published as a new numbered [release](https://github.com/tiger-git2022/whale-usage/releases) such as `v0.1.0-t3`: the base version, then a build number that grows with each release. Earlier releases stay, and each lists the changes since the one before.
+- Every push to `main` is built by GitHub Actions and published as a new numbered [release](https://github.com/tiger-git2022/whale-usage/releases) such as `v0.1.0-t013`: the base version, then a three-digit build number that grows with each release (padded so the releases page lists them in order). Earlier releases stay, and each lists the changes since the one before.
 - The app checks at start and every 6 hours. A new release is downloaded in the background; the app then quits, replaces its exe and starts again, in a few seconds, with a notification. 自动更新 in the menu turns this off; 检查更新 updates right away.
 - The check reads the `update.json` attached to the latest release and falls back to the GitHub API, so the API's 60 requests an hour limit does not apply.
 

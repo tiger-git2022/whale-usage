@@ -9,6 +9,13 @@ test('a higher build number is newer', () => {
   assert.equal(isNewer('0.1.0-t1', '0.1.0-t2'), false)
 })
 
+test('three-digit build numbers compare with the older unpadded ones', () => {
+  assert.equal(isNewer('v0.1.0-t013', '0.1.0-t12'), true)
+  assert.equal(isNewer('0.1.0-t013', '0.1.0-t013'), false)
+  assert.equal(isNewer('0.1.0-t100', '0.1.0-t099'), true)
+  assert.equal(isNewer('0.1.0-t012', '0.1.0-t9'), true)
+})
+
 test('the base version comes first', () => {
   assert.equal(isNewer('0.2.0-t1', '0.1.0-t9'), true)
   assert.equal(isNewer('0.1.1-t1', '0.1-t5'), true)
