@@ -1,8 +1,10 @@
 # Builds the Windows exes. On main every push becomes a numbered GitHub Release, the same way as the
 # EhViewer fork (tiger-git2022/ehviewer-onedrive, .github/workflows/build.yml):
 #
-# Version scheme: tag "v<package.json version>-t<N>", e.g. v0.1.0-t3. N starts at 1 for every base
-# version and grows with each release of it. The in-app updater compares versions the same way
+# Version scheme: tag "v<package.json version>-t<NNN>", e.g. v0.1.0-t003. N starts at 1 for every base
+# version and grows with each release of it. N has three digits because GitHub orders releases of the same
+# day by their tag's pre-release part as text, which put "t9" above "t12". Older tags have no padding
+# (v0.1.0-t12); the number is read the same either way. The in-app updater compares versions the same way
 # (src/version.js). Runs on other branches (workflow_dispatch) only build and test.
 name: Build
 
@@ -62,8 +64,9 @@ jobs:
 
           base=$(node -p "require('./package.json').version.split('-')[0]")
           last=$(git tag --list "v${base}-t*" | sed -E 's/^v.*-t//' | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)
-          build=$(( ${last:-0} + 1 ))
-          version="${base}-t${build}"
+          # 10# reads "012" as twelve, not as an octal number
+          build=$(( 10#${last:-0} + 1 ))
+          version=$(printf '%s-t%03d' "$base" "$build")
           {
             echo "skip=false"
             echo "publish=$PUBLISH"

@@ -1,4 +1,5 @@
-// Release versions are "<base version>-t<N>" (tag "v0.1.0-t3"), see .github/workflows/build.yml.
+// Release versions are "<base version>-t<N>" (tag "v0.1.0-t003", older ones "v0.1.0-t12"), see
+// .github/workflows/build.yml.
 // A higher base version is newer, then a higher N. Same rules as the EhViewer fork's ForkVersion.
 
 const PATTERN = /^v?(\d+(?:\.\d+)*)-t(\d+)$/
