@@ -11,7 +11,8 @@
 // for a close button whose status bar says the weekly limit, and presses it through UI Automation (no
 // mouse movement). The question then carries flags: "<hwnd> <box 0|1> <dismiss 0|1>", and an answer may
 // add "dismissed" with the banner's text. Claude shows the banner from about 75% of the weekly limit, so
-// the widget only asks above BANNER_FROM, every BANNER_EVERY_MS, and rests BANNER_REST_MS after closing one.
+// the widget only asks above BANNER_FROM, every BANNER_EVERY_MS. After closing one it waits until the
+// weekly use has grown BANNER_AGAIN points, as Claude does not show it again sooner.
 
 const { spawn } = require('child_process')
 const log = require('./log')
@@ -123,12 +124,19 @@ const STALL_MS = 5000 // an unanswered question this old means the reader is stu
 const RESTART_MS = 10 * 1000
 const BANNER_FROM = 70 // weekly percent; a little under Claude's 75%, as the widget's figure can lag
 const BANNER_EVERY_MS = 3000
-const BANNER_REST_MS = 30 * 60 * 1000
+const BANNER_AGAIN = 3 // weekly points to wait for after closing the banner
+const BANNER_REST_MS = 30 * 60 * 1000 // the wait instead, when the weekly use is not known
 
-// Whether to look for the banner now. weeklyPercent is the highest weekly window's use, or null when unknown.
-function bannerDue({ weeklyPercent, checkedAt, dismissedAt, now }) {
+// Whether to look for the banner now. weeklyPercent is the highest weekly window's use, or null when
+// unknown; dismissed is { at, weeklyPercent } from the last time the banner was closed, or null.
+function bannerDue({ weeklyPercent, checkedAt, dismissed, now }) {
   if (weeklyPercent != null && weeklyPercent < BANNER_FROM) return false
-  if (dismissedAt != null && now - dismissedAt < BANNER_REST_MS) return false
+  if (dismissed) {
+    if (weeklyPercent != null && dismissed.weeklyPercent != null) {
+      // Lower than when it was closed: the week started over
+      if (weeklyPercent >= dismissed.weeklyPercent && weeklyPercent < dismissed.weeklyPercent + BANNER_AGAIN) return false
+    } else if (now - dismissed.at < BANNER_REST_MS) return false
+  }
   return checkedAt == null || now - checkedAt >= BANNER_EVERY_MS
 }
 
@@ -138,7 +146,8 @@ let latest = null // { hwnd, rect, at }
 let lastStart = 0
 let lastError = null
 let bannerCheckedAt = null
-let bannerDismissedAt = null
+let bannerDismissed = null // { at, weeklyPercent }
+let lastWeekly = null
 
 function start() {
   if (Date.now() - lastStart < RESTART_MS) return
@@ -187,7 +196,7 @@ function answer(line) {
     if (value.error !== lastError) log.warn('input box lookup failed:', value.error)
     lastError = value.error
   } else lastError = null
-  if (value.dismissed) bannerDismissedAt = Date.now()
+  if (value.dismissed) bannerDismissed = { at: Date.now(), weeklyPercent: lastWeekly }
   if (value.dismissed) log.info('closed the weekly limit banner:', value.dismissed)
   const rect = Number.isFinite(value.x) && value.w > 0 && value.h > 0
     ? { left: value.x, top: value.y, right: value.x + value.w, bottom: value.y + value.h }
@@ -204,7 +213,8 @@ function poll(hwnd, { box = true, dismiss = false, weeklyPercent = null } = {}) 
     log.warn('input box reader stopped answering, restarting it')
     stop()
   }
-  const closeBanner = dismiss && bannerDue({ weeklyPercent, checkedAt: bannerCheckedAt, dismissedAt: bannerDismissedAt, now })
+  lastWeekly = weeklyPercent
+  const closeBanner = dismiss && bannerDue({ weeklyPercent, checkedAt: bannerCheckedAt, dismissed: bannerDismissed, now })
   if (!closeBanner && (!box || (latest && latest.hwnd === hwnd && now - latest.at < POLL_MS))) return
   if (!child) start()
   if (!child) return
