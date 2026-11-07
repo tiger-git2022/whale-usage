@@ -13,7 +13,7 @@ test('isLimitBanner knows the weekly limit banner in Chinese and English', () =>
   assert.ok(!isLimitBanner('即将达到 5 小时使用限额'))
 })
 
-test('bannerDue waits for a high weekly figure, spaces checks, and rests after closing', () => {
+test('bannerDue waits for a high weekly figure, spaces checks, and waits for more use after closing', () => {
   const now = 10 * 60 * 60 * 1000
   assert.strictEqual(bannerDue({ weeklyPercent: 40, now }), false)
   assert.strictEqual(bannerDue({ weeklyPercent: 69.9, now }), false)
@@ -22,6 +22,13 @@ test('bannerDue waits for a high weekly figure, spaces checks, and rests after c
   assert.strictEqual(bannerDue({ weeklyPercent: null, now }), true)
   assert.strictEqual(bannerDue({ weeklyPercent: 80, checkedAt: now - 1000, now }), false)
   assert.strictEqual(bannerDue({ weeklyPercent: 80, checkedAt: now - 3000, now }), true)
-  assert.strictEqual(bannerDue({ weeklyPercent: 80, dismissedAt: now - 10 * 60 * 1000, now }), false)
-  assert.strictEqual(bannerDue({ weeklyPercent: 80, dismissedAt: now - 31 * 60 * 1000, now }), true)
+  // Closed at 76%: quiet until 79%, however long it takes
+  const dismissed = { at: now - 5 * 60 * 60 * 1000, weeklyPercent: 76 }
+  assert.strictEqual(bannerDue({ weeklyPercent: 78.9, dismissed, now }), false)
+  assert.strictEqual(bannerDue({ weeklyPercent: 79, dismissed, now }), true)
+  // The week started over and climbed back: look again
+  assert.strictEqual(bannerDue({ weeklyPercent: 72, dismissed, now }), true)
+  // Use not known: a half-hour rest instead
+  assert.strictEqual(bannerDue({ weeklyPercent: null, dismissed: { at: now - 10 * 60 * 1000, weeklyPercent: 76 }, now }), false)
+  assert.strictEqual(bannerDue({ weeklyPercent: null, dismissed: { at: now - 31 * 60 * 1000, weeklyPercent: 76 }, now }), true)
 })
