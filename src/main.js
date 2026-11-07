@@ -36,6 +36,7 @@ const DEFAULTS = {
   // With snapToBox, the same corner measured from the input box's top-right corner instead
   snapToBox: true,
   boxAnchor: { dx: 0, dy: 2 },
+  closeLimitBanner: true, // press the close button of Claude's "approaching your weekly limit" banner
   scale: 0.7,
   showWhen: 'front', // 'front': only while Claude is the active window; 'open': whenever Claude is not minimized
   sound: true,
@@ -72,6 +73,7 @@ let lastBoxRect = null // the input box the character sat on at the last tick (D
 let claudeSeen = null // for logging when Claude's window appears or goes
 let pendingUpdate = null // the newer release found by the last check
 let updateProgress = null // text while an update downloads
+let weeklyPercent = null // the highest weekly window's use, from the last usage read, or null
 
 function loadSettings() {
   try {
@@ -155,7 +157,9 @@ function tick() {
   const inFront = state.claudeInFront || state.selfInFront || dragging
   const show = settings.showWhen === 'open' || process.env.WHALE_FORCE_SHOW === '1' ? true : Boolean(inFront)
   // Only asked while the character shows, so a Claude window in the background is left alone
-  if (settings.snapToBox && show) composer.poll(state.window.hwnd)
+  if ((settings.snapToBox || settings.closeLimitBanner) && show) {
+    composer.poll(state.window.hwnd, { box: settings.snapToBox, dismiss: settings.closeLimitBanner, weeklyPercent })
+  }
   const boxRect = settings.snapToBox ? composer.boxOf(state.window.hwnd) : null
   const box = boxRect ? toDip(boxRect) : null
   if (Boolean(box) !== Boolean(lastBoxRect)) log.info(box ? `on the input box ${JSON.stringify(box)}` : 'no input box, by the window corner')
@@ -207,6 +211,8 @@ function sendUsage() {
   const text = (usage?.limits || []).map(l => `${l.kind} ${Math.round(l.percentUsed)}%`).join(', ')
   if (text !== lastUsageText) log.info('usage', text)
   lastUsageText = text
+  const weekly = (usage?.limits || []).filter(l => String(l.kind).startsWith('seven_day')).map(l => l.percentUsed)
+  weeklyPercent = weekly.length ? Math.max(...weekly) : null
   win.webContents.send('usage', usage)
 }
 
@@ -286,6 +292,7 @@ function openMenu(at) {
     { type: 'item', id: 'skin:pick', icon: 'EB9F', text: '用自己的图片…' },
     { type: 'item', id: 'snap', icon: 'E718', text: '贴着输入框', checked: settings.snapToBox },
     { type: 'item', id: 'reset', icon: 'E7A7', text: '重置位置' },
+    { type: 'item', id: 'banner', icon: 'E711', text: '自动关掉「即将达到每周限额」提醒', checked: settings.closeLimitBanner },
     { type: 'separator' },
     webUsageEntry(),
     { type: 'separator' },
@@ -310,8 +317,12 @@ function openMenu(at) {
     'skin:pick': chooseSkin,
     snap: () => {
       setSetting('snapToBox', !settings.snapToBox)
-      if (!settings.snapToBox) composer.stop()
+      if (!settings.snapToBox && !settings.closeLimitBanner) composer.stop()
       lastBounds = null
+    },
+    banner: () => {
+      setSetting('closeLimitBanner', !settings.closeLimitBanner)
+      if (!settings.snapToBox && !settings.closeLimitBanner) composer.stop()
     },
     reset: () => {
       settings.boxAnchor = { ...DEFAULTS.boxAnchor }

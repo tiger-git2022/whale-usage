@@ -5,9 +5,21 @@
 // physical pixels, as JSON on a line: {"x","y","w","h"}, {} when there is no box, or {"error"}.
 // The box is the rounded frame around the prompt editor (a ProseMirror editor), which grows as the
 // prompt gets longer. With panes side by side, it is the rightmost one, next to where the character sits.
+//
+// The same process also closes the "approaching your weekly limit" banner Claude shows above the input
+// box: a status bar with the message, a "get more usage" button and a close button. When asked, it looks
+// for a close button whose status bar says the weekly limit, and presses it through UI Automation (no
+// mouse movement). The question then carries flags: "<hwnd> <box 0|1> <dismiss 0|1>", and an answer may
+// add "dismissed" with the banner's text. Claude shows the banner from about 75% of the weekly limit, so
+// the widget only asks above BANNER_FROM, every BANNER_EVERY_MS, and rests BANNER_REST_MS after closing one.
 
 const { spawn } = require('child_process')
 const log = require('./log')
+
+// The banner's text, in Chinese or English: 即将达到每周使用限额, Approaching weekly usage limit, …
+// No single quotes: it goes into the script inside a PowerShell string.
+const LIMIT_BANNER = /每周.{0,12}限额|weekly.{0,24}limit/i
+const isLimitBanner = text => LIMIT_BANNER.test(text)
 
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -19,6 +31,32 @@ $editCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlT
 $box = $null
 $boxHwnd = 0
 $searched = [DateTime]::MinValue
+$closeCond = New-Object System.Windows.Automation.AndCondition(
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
+  (New-Object System.Windows.Automation.OrCondition(
+    (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, '关闭')),
+    (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, 'Close')),
+    (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, 'Dismiss')))))
+
+# Presses the close button of the weekly limit banner, and returns the banner's text, or $null
+function Close-Banner($hwnd) {
+  $root = $AE::FromHandle([IntPtr]$hwnd)
+  foreach ($b in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $closeCond)) {
+    $bar = $walker.GetParent($b)
+    if (-not $bar -or $bar.Current.ControlType -ne [System.Windows.Automation.ControlType]::StatusBar) { continue }
+    $texts = @()
+    $ch = $walker.GetFirstChild($bar)
+    while ($ch) {
+      if ($ch.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text) { $texts += $ch.Current.Name }
+      $ch = $walker.GetNextSibling($ch)
+    }
+    $text = ($texts -join '').Trim()
+    if ($text -notmatch '${LIMIT_BANNER.source}') { continue }
+    $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    return $text
+  }
+  return $null
+}
 
 function Find-Box($hwnd) {
   $root = $AE::FromHandle([IntPtr]$hwnd)
@@ -44,19 +82,33 @@ function Find-Box($hwnd) {
 while ($null -ne ($line = [Console]::In.ReadLine())) {
   $out = '{}'
   try {
-    $hwnd = [Int64]$line
-    $age = ([DateTime]::UtcNow - $searched).TotalSeconds
-    if ($hwnd -ne $boxHwnd -or ((-not $box) -and $age -gt 1) -or $age -gt 5) {
-      $searched = [DateTime]::UtcNow
-      $boxHwnd = $hwnd
-      $box = Find-Box $hwnd
+    $parts = $line.Split(' ')
+    $hwnd = [Int64]$parts[0]
+    $wantBox = $parts.Length -lt 2 -or $parts[1] -eq '1'
+    $wantDismiss = $parts.Length -ge 3 -and $parts[2] -eq '1'
+    $fields = @()
+    if ($wantDismiss) {
+      $closed = Close-Banner $hwnd
+      if ($closed) {
+        $fields += '"dismissed":' + (ConvertTo-Json ([string]$closed) -Compress)
+        $searched = [DateTime]::MinValue
+      }
     }
-    if ($box) {
-      $c = $box.Current
-      $r = $c.BoundingRectangle
-      if ($c.IsOffscreen -or $r.IsEmpty -or $r.Width -le 0) { $box = $null }
-      else { $out = '{"x":' + [int]$r.X + ',"y":' + [int]$r.Y + ',"w":' + [int]$r.Width + ',"h":' + [int]$r.Height + '}' }
+    if ($wantBox) {
+      $age = ([DateTime]::UtcNow - $searched).TotalSeconds
+      if ($hwnd -ne $boxHwnd -or ((-not $box) -and $age -gt 1) -or $age -gt 5) {
+        $searched = [DateTime]::UtcNow
+        $boxHwnd = $hwnd
+        $box = Find-Box $hwnd
+      }
+      if ($box) {
+        $c = $box.Current
+        $r = $c.BoundingRectangle
+        if ($c.IsOffscreen -or $r.IsEmpty -or $r.Width -le 0) { $box = $null }
+        else { $fields += '"x":' + [int]$r.X + ',"y":' + [int]$r.Y + ',"w":' + [int]$r.Width + ',"h":' + [int]$r.Height }
+      }
     }
+    $out = '{' + ($fields -join ',') + '}'
   } catch {
     $box = $null
     $out = '{"error":' + (ConvertTo-Json ([string]$_.Exception.Message) -Compress) + '}'
@@ -69,12 +121,24 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 const POLL_MS = 200 // how often to ask while the character follows the box
 const STALL_MS = 5000 // an unanswered question this old means the reader is stuck
 const RESTART_MS = 10 * 1000
+const BANNER_FROM = 70 // weekly percent; a little under Claude's 75%, as the widget's figure can lag
+const BANNER_EVERY_MS = 3000
+const BANNER_REST_MS = 30 * 60 * 1000
+
+// Whether to look for the banner now. weeklyPercent is the highest weekly window's use, or null when unknown.
+function bannerDue({ weeklyPercent, checkedAt, dismissedAt, now }) {
+  if (weeklyPercent != null && weeklyPercent < BANNER_FROM) return false
+  if (dismissedAt != null && now - dismissedAt < BANNER_REST_MS) return false
+  return checkedAt == null || now - checkedAt >= BANNER_EVERY_MS
+}
 
 let child = null
 let asked = null // { hwnd, at } while a question is out
 let latest = null // { hwnd, rect, at }
 let lastStart = 0
 let lastError = null
+let bannerCheckedAt = null
+let bannerDismissedAt = null
 
 function start() {
   if (Date.now() - lastStart < RESTART_MS) return
@@ -123,25 +187,30 @@ function answer(line) {
     if (value.error !== lastError) log.warn('input box lookup failed:', value.error)
     lastError = value.error
   } else lastError = null
+  if (value.dismissed) bannerDismissedAt = Date.now()
+  if (value.dismissed) log.info('closed the weekly limit banner:', value.dismissed)
   const rect = Number.isFinite(value.x) && value.w > 0 && value.h > 0
     ? { left: value.x, top: value.y, right: value.x + value.w, bottom: value.y + value.h }
     : null
   latest = { hwnd, rect, at: Date.now() }
 }
 
-// Asks for the box of the window `hwnd`, at most every POLL_MS
-function poll(hwnd) {
+// Asks for the box of the window `hwnd` (with box) at most every POLL_MS, and, with dismiss, closes its
+// weekly limit banner when bannerDue says so
+function poll(hwnd, { box = true, dismiss = false, weeklyPercent = null } = {}) {
   const now = Date.now()
   if (asked) {
     if (now - asked.at < STALL_MS) return
     log.warn('input box reader stopped answering, restarting it')
     stop()
   }
-  if (latest && latest.hwnd === hwnd && now - latest.at < POLL_MS) return
+  const closeBanner = dismiss && bannerDue({ weeklyPercent, checkedAt: bannerCheckedAt, dismissedAt: bannerDismissedAt, now })
+  if (!closeBanner && (!box || (latest && latest.hwnd === hwnd && now - latest.at < POLL_MS))) return
   if (!child) start()
   if (!child) return
   asked = { hwnd, at: now }
-  child.stdin.write(`${hwnd}\n`)
+  if (closeBanner) bannerCheckedAt = now
+  child.stdin.write(`${hwnd} ${box ? 1 : 0} ${closeBanner ? 1 : 0}\n`)
 }
 
 // The box's last known rectangle (physical pixels: left, top, right, bottom), or null. It may be from
@@ -158,4 +227,4 @@ function stop() {
   latest = null
 }
 
-module.exports = { poll, boxOf, stop }
+module.exports = { poll, boxOf, stop, isLimitBanner, bannerDue }
