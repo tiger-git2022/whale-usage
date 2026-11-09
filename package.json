@@ -1,7 +1,7 @@
 {
   "name": "whale-usage-widget",
   "productName": "Whale Usage",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "description": "A desktop pet that shows your Claude subscription usage next to the Claude app",
   "main": "src/main.js",
   "author": "tiger",
