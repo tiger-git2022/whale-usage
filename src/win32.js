@@ -76,6 +76,12 @@ function frameRect(hwnd) {
   return rect
 }
 
+// The whole window, invisible resize borders included: what UI Automation reports for it
+function outerRect(hwnd) {
+  const rect = {}
+  return GetWindowRect(hwnd, rect) ? rect : null
+}
+
 function className(hwnd) {
   const buf = Buffer.alloc(256 * 2)
   const n = GetClassNameW(hwnd, buf, 256)
@@ -123,6 +129,7 @@ function claudeState(cached, ownPid) {
   return {
     window: win,
     rect: frameRect(win.hwnd),
+    outerRect: outerRect(win.hwnd),
     minimized,
     claudeInFront: foregroundPid === win.pid,
     selfInFront: foregroundPid === ownPid,

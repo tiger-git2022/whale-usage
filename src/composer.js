@@ -3,6 +3,10 @@
 // Claude's window exposes its page through Windows UI Automation. A hidden PowerShell process reads it:
 // the widget writes a window handle on a line, and it answers with the box's screen rectangle in
 // physical pixels, as JSON on a line: {"x","y","w","h"}, {} when there is no box, or {"error"}.
+// The answer also carries the window's own rectangle as UI Automation sees it ("wx","wy","ww","wh").
+// The reader asks to be per-monitor DPI aware, but if Windows still hands it scaled coordinates
+// (the display scale changed after it started, so it keeps the old one), fitToWindow maps the box
+// back by comparing that rectangle with the real one.
 // The box is the rounded frame around the prompt editor (a ProseMirror editor), which grows as the
 // prompt gets longer. With panes side by side, it is the rightmost one, next to where the character sits.
 //
@@ -25,6 +29,12 @@ const isLimitBanner = text => LIMIT_BANNER.test(text)
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Real pixels even after the display scale changes; otherwise Windows scales what UI Automation reports
+try {
+  Add-Type -Namespace Whale -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c); [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);'
+  [void][Whale.Dpi]::SetProcessDpiAwarenessContext([IntPtr](-4))
+  [void][Whale.Dpi]::SetThreadDpiAwarenessContext([IntPtr](-4))
+} catch {}
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $AE = [System.Windows.Automation.AutomationElement]
 $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
@@ -106,7 +116,11 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         $c = $box.Current
         $r = $c.BoundingRectangle
         if ($c.IsOffscreen -or $r.IsEmpty -or $r.Width -le 0) { $box = $null }
-        else { $fields += '"x":' + [int]$r.X + ',"y":' + [int]$r.Y + ',"w":' + [int]$r.Width + ',"h":' + [int]$r.Height }
+        else {
+          $fields += '"x":' + [int]$r.X + ',"y":' + [int]$r.Y + ',"w":' + [int]$r.Width + ',"h":' + [int]$r.Height
+          $wr = $AE::FromHandle([IntPtr]$hwnd).Current.BoundingRectangle
+          if (-not $wr.IsEmpty) { $fields += '"wx":' + [int]$wr.X + ',"wy":' + [int]$wr.Y + ',"ww":' + [int]$wr.Width + ',"wh":' + [int]$wr.Height }
+        }
       }
     }
     $out = '{' + ($fields -join ',') + '}'
@@ -201,7 +215,10 @@ function answer(line) {
   const rect = Number.isFinite(value.x) && value.w > 0 && value.h > 0
     ? { left: value.x, top: value.y, right: value.x + value.w, bottom: value.y + value.h }
     : null
-  latest = { hwnd, rect, at: Date.now() }
+  const frame = rect && Number.isFinite(value.wx) && value.ww > 0 && value.wh > 0
+    ? { left: value.wx, top: value.wy, right: value.wx + value.ww, bottom: value.wy + value.wh }
+    : null
+  latest = { hwnd, rect, frame, at: Date.now() }
 }
 
 // Asks for the box of the window `hwnd` (with box) at most every POLL_MS, and, with dismiss, closes its
@@ -223,11 +240,34 @@ function poll(hwnd, { box = true, dismiss = false, weeklyPercent = null } = {}) 
   child.stdin.write(`${hwnd} ${box ? 1 : 0} ${closeBanner ? 1 : 0}\n`)
 }
 
-// The box's last known rectangle (physical pixels: left, top, right, bottom), or null. It may be from
-// before the character was last hidden; the next answer, a moment later, corrects it.
-function boxOf(hwnd) {
+// Maps the box from the window rectangle UI Automation reported (seen) to the window's real one
+// (physical pixels), when Windows scaled the reader's coordinates. A display scale change scales both
+// sides alike and by at least a step (125% to 150% is 1.2); a window being resized changes them unevenly
+// or a little between the answer and now, so that is left alone.
+function fitToWindow(rect, seen, real) {
+  if (!rect || !seen || !real) return rect
+  const sx = (real.right - real.left) / (seen.right - seen.left)
+  const sy = (real.bottom - real.top) / (seen.bottom - seen.top)
+  if (!(sx > 0 && sy > 0) || Math.abs(sx - 1) < 0.05 || Math.abs(sx / sy - 1) > 0.02) return rect
+  const x = v => Math.round(real.left + (v - seen.left) * sx)
+  const y = v => Math.round(real.top + (v - seen.top) * sy)
+  return { left: x(rect.left), top: y(rect.top), right: x(rect.right), bottom: y(rect.bottom) }
+}
+
+let lastScaled = null
+
+// The box's last known rectangle (physical pixels: left, top, right, bottom), or null. windowRect is
+// the Claude window's real outer rectangle (GetWindowRect), to correct coordinates Windows scaled.
+// It may be from before the character was last hidden; the next answer, a moment later, corrects it.
+function boxOf(hwnd, windowRect = null) {
   if (!latest || latest.hwnd !== hwnd) return null
-  return latest.rect
+  const rect = fitToWindow(latest.rect, latest.frame, windowRect)
+  const scaled = rect !== latest.rect
+  if (scaled !== lastScaled) {
+    if (scaled) log.info('input box coordinates were scaled by Windows, correcting', JSON.stringify(latest.frame), JSON.stringify(windowRect))
+    lastScaled = scaled
+  }
+  return rect
 }
 
 function stop() {
@@ -237,4 +277,4 @@ function stop() {
   latest = null
 }
 
-module.exports = { poll, boxOf, stop, isLimitBanner, bannerDue }
+module.exports = { poll, boxOf, stop, isLimitBanner, bannerDue, fitToWindow }
