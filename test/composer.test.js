@@ -32,3 +32,17 @@ test('bannerDue waits for a high weekly figure, spaces checks, and waits for mor
   assert.strictEqual(bannerDue({ weeklyPercent: null, dismissed: { at: now - 10 * 60 * 1000, weeklyPercent: 76 }, now }), false)
   assert.strictEqual(bannerDue({ weeklyPercent: null, dismissed: { at: now - 31 * 60 * 1000, weeklyPercent: 76 }, now }), true)
 })
+
+test('fitToWindow maps a box Windows scaled back onto the real window', () => {
+  const { fitToWindow } = require('../src/composer')
+  const real = { left: -8, top: -8, right: 2568, bottom: 1400 }
+  const box = { left: 100, top: 1200, right: 2400, bottom: 1300 }
+  // Same size: left alone
+  assert.strictEqual(fitToWindow(box, real, real), box)
+  assert.strictEqual(fitToWindow(box, null, real), box)
+  // The reader still thinks the display is at 100% while it is at 175%
+  const k = 1 / 1.75
+  const s = r => ({ left: r.left * k, top: r.top * k, right: r.right * k, bottom: r.bottom * k })
+  const fitted = fitToWindow(s(box), s(real), real)
+  for (const side of ['left', 'top', 'right', 'bottom']) assert.ok(Math.abs(fitted[side] - box[side]) <= 1, side)
+})

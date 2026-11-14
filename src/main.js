@@ -160,7 +160,7 @@ function tick() {
   if ((settings.snapToBox || settings.closeLimitBanner) && show) {
     composer.poll(state.window.hwnd, { box: settings.snapToBox, dismiss: settings.closeLimitBanner, weeklyPercent })
   }
-  const boxRect = settings.snapToBox ? composer.boxOf(state.window.hwnd) : null
+  const boxRect = settings.snapToBox ? composer.boxOf(state.window.hwnd, state.outerRect) : null
   const box = boxRect ? toDip(boxRect) : null
   if (Boolean(box) !== Boolean(lastBoxRect)) log.info(box ? `on the input box ${JSON.stringify(box)}` : 'no input box, by the window corner')
   if (!dragging) {
