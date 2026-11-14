@@ -241,12 +241,14 @@ function poll(hwnd, { box = true, dismiss = false, weeklyPercent = null } = {}) 
 }
 
 // Maps the box from the window rectangle UI Automation reported (seen) to the window's real one
-// (physical pixels), when the two differ in size: Windows scaled the reader's coordinates.
+// (physical pixels), when Windows scaled the reader's coordinates. A display scale change scales both
+// sides alike and by at least a step (125% to 150% is 1.2); a window being resized changes them unevenly
+// or a little between the answer and now, so that is left alone.
 function fitToWindow(rect, seen, real) {
   if (!rect || !seen || !real) return rect
   const sx = (real.right - real.left) / (seen.right - seen.left)
   const sy = (real.bottom - real.top) / (seen.bottom - seen.top)
-  if (!(sx > 0 && sy > 0) || (Math.abs(sx - 1) < 0.01 && Math.abs(sy - 1) < 0.01)) return rect
+  if (!(sx > 0 && sy > 0) || Math.abs(sx - 1) < 0.05 || Math.abs(sx / sy - 1) > 0.02) return rect
   const x = v => Math.round(real.left + (v - seen.left) * sx)
   const y = v => Math.round(real.top + (v - seen.top) * sy)
   return { left: x(rect.left), top: y(rect.top), right: x(rect.right), bottom: y(rect.bottom) }

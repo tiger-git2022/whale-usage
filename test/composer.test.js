@@ -45,4 +45,9 @@ test('fitToWindow maps a box Windows scaled back onto the real window', () => {
   const s = r => ({ left: r.left * k, top: r.top * k, right: r.right * k, bottom: r.bottom * k })
   const fitted = fitToWindow(s(box), s(real), real)
   for (const side of ['left', 'top', 'right', 'bottom']) assert.ok(Math.abs(fitted[side] - box[side]) <= 1, side)
+  // The window is being resized: the answer is a moment behind, so sizes differ, but nothing is scaled
+  const widened = { ...real, right: real.right + 300 }
+  assert.strictEqual(fitToWindow(box, real, widened), box)
+  const nudged = { ...real, right: real.right + 20, bottom: real.bottom + 10 }
+  assert.strictEqual(fitToWindow(box, real, nudged), box)
 })
