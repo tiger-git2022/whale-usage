@@ -1,11 +1,10 @@
-# Builds the Windows exes. On main every push becomes a numbered GitHub Release, the same way as the
+# Builds the Windows exes. On main every push becomes a GitHub Release, the same way as the
 # EhViewer fork (tiger-git2022/ehviewer-onedrive, .github/workflows/build.yml):
 #
-# Version scheme: tag "v<package.json version>-t<NNN>", e.g. v0.1.0-t003. N starts at 1 for every base
-# version and grows with each release of it. N has three digits because GitHub orders releases of the same
-# day by their tag's pre-release part as text, which put "t9" above "t12". Older tags have no padding
-# (v0.1.0-t12); the number is read the same either way. The in-app updater compares versions the same way
-# (src/version.js). Runs on other branches (workflow_dispatch) only build and test.
+# Version scheme: semantic version, tag "vX.Y.Z". X.Y comes from package.json's version: a change with a new
+# feature raises Y there (Z written as 0), a big change raises X. Z counts the releases of X.Y from 0, so a fix
+# needs no edit. Releases before November 2026 were "v0.1.0-tNNN"; they all count as older. The in-app updater
+# compares versions the same way (src/version.js). Runs on other branches (workflow_dispatch) only build and test.
 name: Build
 
 on:
@@ -55,18 +54,27 @@ jobs:
           set -euo pipefail
           git fetch --force --tags origin
 
-          existing=$(git tag --points-at "$GITHUB_SHA" --list 'v*-t*' | head -n 1)
+          existing=$(git tag --points-at "$GITHUB_SHA" --list 'v*' | head -n 1)
           if [ "$PUBLISH" = "true" ] && [ -n "$existing" ] && [ "$FORCE" != "true" ]; then
             echo "Commit ${GITHUB_SHA::7} was already released as $existing, skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          base=$(node -p "require('./package.json').version.split('-')[0]")
-          last=$(git tag --list "v${base}-t*" | sed -E 's/^v.*-t//' | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)
-          # 10# reads "012" as twelve, not as an octal number
-          build=$(( 10#${last:-0} + 1 ))
-          version=$(printf '%s-t%03d' "$base" "$build")
+          series=$(node -p "require('./package.json').version.split('.').slice(0, 2).join('.')")
+          if ! [[ "$series" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::package.json's version must start with MAJOR.MINOR, not '$series'"
+            exit 1
+          fi
+          last=$(git tag --list "v${series}.*" | sed "s/^v${series}\.//" | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)
+          if [ -n "$last" ]; then patch=$(( last + 1 )); else patch=0; fi
+          version="$series.$patch"
+          # A lower X.Y in package.json would publish a release older than the latest one
+          newest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ -n "$newest" ] && [ "$(printf '%s\n' "$newest" "v$version" | sort -V | tail -n 1)" != "v$version" ]; then
+            echo "::error::v$version would be older than $newest, raise the version in package.json"
+            exit 1
+          fi
           {
             echo "skip=false"
             echo "publish=$PUBLISH"
@@ -115,7 +123,7 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          previous=$(git describe --tags --abbrev=0 --match 'v*-t*' HEAD 2>/dev/null || true)
+          previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)
           if [ -n "$previous" ]; then
             commits=$(git rev-list --first-parent "$previous..HEAD")
             changes=""

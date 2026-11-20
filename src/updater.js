@@ -1,6 +1,6 @@
 // Updates come from this repository's GitHub releases, the way the EhViewer fork does it.
 //
-// Every push to main publishes a numbered release ("v0.1.0-t3", see .github/workflows/build.yml) with
+// Every push to main publishes a release ("v0.8.0", before "v0.1.0-t3", see .github/workflows/build.yml) with
 // update.json attached: the fields of the API's release object that matter here. It is fetched from
 // /releases/latest/download/update.json, which, unlike api.github.com (60 requests an hour per IP
 // without login), has no request limit; releases without it fall back to the API.

@@ -4,7 +4,9 @@
 // Electron windows expose their page through Windows UI Automation. A hidden PowerShell process
 // reads it: the widget writes a request line:
 //   "<hwnd> <box 0|1> <dismiss 0|1> <host claude|antigravity> <model 0|1>"
-// and it answers with JSON on a line: {"x","y","w","h","model","dismissed"}, {}, or {"error"}.
+// and it answers with JSON on a line: {"x","y","w","h","wx","wy","ww","wh","model","dismissed"},
+// {}, or {"error"}. The reader asks to be per-monitor DPI aware, and fitToWindow corrects scaled
+// coordinates using the window's reported rectangle ("wx","wy","ww","wh") against the real one.
 //
 // For Claude, the box is the rounded frame around the ProseMirror prompt editor (rightmost when
 // panes are side by side). The same process also closes Claude's "approaching your weekly limit"
@@ -42,6 +44,12 @@ function extractModelLabel(text) {
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Real pixels even after the display scale changes; otherwise Windows scales what UI Automation reports
+try {
+  Add-Type -Namespace Whale -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c); [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);'
+  [void][Whale.Dpi]::SetProcessDpiAwarenessContext([IntPtr](-4))
+  [void][Whale.Dpi]::SetThreadDpiAwarenessContext([IntPtr](-4))
+} catch {}
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $AE = [System.Windows.Automation.AutomationElement]
 $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
@@ -224,7 +232,11 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         $c = $box.Current
         $r = $c.BoundingRectangle
         if ($c.IsOffscreen -or $r.IsEmpty -or $r.Width -le 0) { $box = $null }
-        else { $fields += '"x":' + [int]$r.X + ',"y":' + [int]$r.Y + ',"w":' + [int]$r.Width + ',"h":' + [int]$r.Height }
+        else {
+          $fields += '"x":' + [int]$r.X + ',"y":' + [int]$r.Y + ',"w":' + [int]$r.Width + ',"h":' + [int]$r.Height
+          $wr = $AE::FromHandle([IntPtr]$hwnd).Current.BoundingRectangle
+          if (-not $wr.IsEmpty) { $fields += '"wx":' + [int]$wr.X + ',"wy":' + [int]$wr.Y + ',"ww":' + [int]$wr.Width + ',"wh":' + [int]$wr.Height }
+        }
       }
     }
     if ($wantModel -and $hostType -eq 'antigravity') {
@@ -331,8 +343,11 @@ function answer(line) {
   const rect = Number.isFinite(value.x) && value.w > 0 && value.h > 0
     ? { left: value.x, top: value.y, right: value.x + value.w, bottom: value.y + value.h }
     : null
+  const frame = rect && Number.isFinite(value.wx) && value.ww > 0 && value.wh > 0
+    ? { left: value.wx, top: value.wy, right: value.wx + value.ww, bottom: value.wy + value.wh }
+    : null
   const model = typeof value.model === 'string' && value.model.trim() ? extractModelLabel(value.model) : null
-  latest = { hwnd, host, rect, model, at: Date.now() }
+  latest = { hwnd, host, rect, frame, model, at: Date.now() }
 }
 
 // Asks for the box of the window `hwnd` (with box) at most every POLL_MS, closes Claude's weekly
@@ -358,11 +373,34 @@ function poll(hwnd, { host = 'claude', box = true, dismiss = false, weeklyPercen
   child.stdin.write(`${hwnd} ${box ? 1 : 0} ${closeBanner ? 1 : 0} ${host} ${wantModel ? 1 : 0}\n`)
 }
 
-// The box's last known rectangle (physical pixels: left, top, right, bottom), or null. It may be from
-// before the character was last hidden; the next answer, a moment later, corrects it.
-function boxOf(hwnd) {
+// Maps the box from the window rectangle UI Automation reported (seen) to the window's real one
+// (physical pixels), when Windows scaled the reader's coordinates. A display scale change scales both
+// sides alike and by at least a step (125% to 150% is 1.2); a window being resized changes them unevenly
+// or a little between the answer and now, so that is left alone.
+function fitToWindow(rect, seen, real) {
+  if (!rect || !seen || !real) return rect
+  const sx = (real.right - real.left) / (seen.right - seen.left)
+  const sy = (real.bottom - real.top) / (seen.bottom - seen.top)
+  if (!(sx > 0 && sy > 0) || Math.abs(sx - 1) < 0.05 || Math.abs(sx / sy - 1) > 0.02) return rect
+  const x = v => Math.round(real.left + (v - seen.left) * sx)
+  const y = v => Math.round(real.top + (v - seen.top) * sy)
+  return { left: x(rect.left), top: y(rect.top), right: x(rect.right), bottom: y(rect.bottom) }
+}
+
+let lastScaled = null
+
+// The box's last known rectangle (physical pixels: left, top, right, bottom), or null. windowRect is
+// the Claude window's real outer rectangle (GetWindowRect), to correct coordinates Windows scaled.
+// It may be from before the character was last hidden; the next answer, a moment later, corrects it.
+function boxOf(hwnd, windowRect = null) {
   if (!latest || latest.hwnd !== hwnd) return null
-  return latest.rect
+  const rect = fitToWindow(latest.rect, latest.frame, windowRect)
+  const scaled = rect !== latest.rect
+  if (scaled !== lastScaled) {
+    if (scaled) log.info('input box coordinates were scaled by Windows, correcting', JSON.stringify(latest.frame), JSON.stringify(windowRect))
+    lastScaled = scaled
+  }
+  return rect
 }
 
 // The model label read near Antigravity's composer for `hwnd`, or null.
@@ -378,4 +416,4 @@ function stop() {
   latest = null
 }
 
-module.exports = { poll, boxOf, modelOf, stop, isLimitBanner, isModelLabel, extractModelLabel, bannerDue }
+module.exports = { poll, boxOf, modelOf, stop, isLimitBanner, isModelLabel, extractModelLabel, bannerDue, fitToWindow }

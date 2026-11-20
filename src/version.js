@@ -1,18 +1,19 @@
-// Release versions are "<base version>-t<N>" (tag "v0.1.0-t003", older ones "v0.1.0-t12"), see
-// .github/workflows/build.yml.
-// A higher base version is newer, then a higher N. Same rules as the EhViewer fork's ForkVersion.
+// Release versions are plain "X.Y.Z" (tag "v0.8.0"); older releases were "<base version>-t<N>" (tag
+// "v0.1.0-t015", older ones "v0.1.0-t12"), see .github/workflows/build.yml.
+// The numbers compare first, then N (0 without "-t"), so every plain release is newer than the old
+// numbered ones (0.8.0 > 0.1.0-t015). Same rules as the EhViewer fork's ForkVersion.
 
-const PATTERN = /^v?(\d+(?:\.\d+)*)-t(\d+)$/
+const PATTERN = /^v?(\d+(?:\.\d+)*)(?:-t(\d+))?$/
 
 function parse(version) {
   const match = PATTERN.exec(String(version).trim())
   if (!match) return null
-  return { base: match[1].split('.').map(Number), build: Number(match[2]) }
+  return { base: match[1].split('.').map(Number), build: Number(match[2] ?? 0) }
 }
 
 /**
- * Whether release `latest` is newer than the running `current` version. A build without a release
- * number (a local build) is older than any release; a release without one is never offered.
+ * Whether release `latest` is newer than the running `current` version. A version this can't read
+ * (a local build with some other suffix) is older than any release.
  */
 function isNewer(latest, current) {
   const next = parse(latest)

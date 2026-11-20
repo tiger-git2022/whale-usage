@@ -29,3 +29,18 @@ test('builds without a release number', () => {
   assert.equal(isNewer('v0.1.0', '0.1.0-t1'), false)
   assert.equal(isNewer('0.1.0', '0.1.0'), false)
 })
+
+test('plain versions are newer than the old numbered ones', () => {
+  assert.equal(isNewer('v0.8.0', '0.1.0-t015'), true)
+  assert.equal(isNewer('0.8.0', '0.1.0-t9'), true)
+  assert.equal(isNewer('0.1.0-t016', '0.8.0'), false)
+})
+
+test('plain versions compare by number', () => {
+  assert.equal(isNewer('v0.8.1', '0.8.0'), true)
+  assert.equal(isNewer('0.9.0', '0.8.12'), true)
+  assert.equal(isNewer('0.8.10', '0.8.9'), true)
+  assert.equal(isNewer('1.0.0', '0.99.99'), true)
+  assert.equal(isNewer('0.8.0', '0.8.0'), false)
+  assert.equal(isNewer('0.7.9', '0.8.0'), false)
+})

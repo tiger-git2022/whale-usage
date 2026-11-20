@@ -238,7 +238,6 @@ function tick() {
       detectModel: wantModel,
     })
   }
-
   if (host === 'antigravity' && show) {
     const uiModel = composer.modelOf(state.window.hwnd)
     if (uiModel && uiModel !== lastUiModel) {
@@ -248,7 +247,7 @@ function tick() {
     }
   }
 
-  const boxRect = settings.snapToBox ? composer.boxOf(state.window.hwnd) : null
+  const boxRect = settings.snapToBox ? composer.boxOf(state.window.hwnd, state.outerRect) : null
   const box = boxRect ? toDip(boxRect) : null
   if (Boolean(box) !== Boolean(lastBoxRect)) log.info(box ? `on the input box ${JSON.stringify(box)}` : 'no input box, by the window corner')
   if (!dragging) {
