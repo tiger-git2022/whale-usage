@@ -836,6 +836,20 @@ async function readLocalQuota({ now = Date.now() } = {}) {
   return { ok: false, code: 'rpc-failed', error: '反重力本地服务没有返回额度数据（可能版本不兼容）' }
 }
 
+// Picks the most recent known Antigravity model between UI Automation (instant on model picker
+// change) and the hook state file (written when a turn runs).
+function pickActiveModel({ uiModel = null, uiModelAt = 0, hookModel = null, hookUpdatedAt = 0, usageModel = null } = {}) {
+  const ui = typeof uiModel === 'string' && uiModel.trim() ? uiModel.trim() : null
+  const hook = typeof hookModel === 'string' && hookModel.trim() ? hookModel.trim() : null
+  const usage = typeof usageModel === 'string' && usageModel.trim() ? usageModel.trim() : null
+  if (ui && hook) {
+    const uAt = Number.isFinite(uiModelAt) ? uiModelAt : 0
+    const hAt = Number.isFinite(hookUpdatedAt) ? hookUpdatedAt : 0
+    return hAt > uAt ? hook : ui
+  }
+  return ui || hook || usage || null
+}
+
 // Builds the normalized payload sent to the renderer for Antigravity mode.
 function buildRendererPayload({ usage, activeModel, overrideGroup = 'auto', quotaStatus = 'empty', quotaError = null }) {
   const groups = usage?.groups || []
@@ -1271,6 +1285,7 @@ module.exports = {
   parseUserStatus,
   parseLanguageServerProcesses,
   readLocalQuota,
+  pickActiveModel,
   buildRendererPayload,
   parseJsonStdout,
   isLoginRequired,

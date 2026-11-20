@@ -28,17 +28,29 @@ const isLimitBanner = text => LIMIT_BANNER.test(text)
 const MODEL_LABEL = /\b(?:gemini\s+(?:\d|pro|flash|ultra|nano)[\w.\-/+\s()高中低]*|claude\s+(?:opus|sonnet|haiku|\d)[\w.\-/+\s()高中低]*|orchestrator\s*\([\w.\-/+\s()高中低]+\)|gpt(?:-[\w.\-]+)+[\w.\-/+\s()高中低]*)/i
 const MENU_BADGE = /新建|通知|不可用|unavailable|disabled|查看用量|view usage/i
 
+const EFFORT_LINE = /^(?:[高中低]|\(?(?:high|medium|low|fast|thinking)\)?)$/i
+
+function normalizeModelCandidate(text) {
+  if (typeof text !== 'string') return ''
+  const lines = text
+    .split(/[\r\n]+/)
+    .map(part => part.trim())
+    .filter(Boolean)
+  if (lines.length === 1) return lines[0]
+  if (lines.length === 2 && EFFORT_LINE.test(lines[1])) return `${lines[0]} ${lines[1]}`
+  return ''
+}
+
 function isModelLabel(text) {
-  if (typeof text !== 'string') return false
-  const clean = text.trim()
-  if (!clean || clean.length > 48 || /[\r\n,;!?\u3002\uff0c\uff01\uff1f\uff1b]/.test(clean)) return false
+  const clean = normalizeModelCandidate(text)
+  if (!clean || clean.length > 48 || /[,;!?\u3002\uff0c\uff01\uff1f\uff1b]/.test(clean)) return false
   if (/https?:\/\/|[\\/]{2,}/.test(clean) || MENU_BADGE.test(clean)) return false
   return MODEL_LABEL.test(clean)
 }
 
 function extractModelLabel(text) {
-  if (!isModelLabel(text)) return null
-  const clean = text.trim()
+  const clean = normalizeModelCandidate(text)
+  if (!isModelLabel(clean)) return null
   const match = clean.match(MODEL_LABEL)
   return match ? match[0].trim() : clean
 }
@@ -62,14 +74,17 @@ $modelCond = New-Object System.Windows.Automation.OrCondition(
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::ComboBox)),
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem)))
+$modelTextCond = New-Object System.Windows.Automation.OrCondition($modelCond, $textCond)
 $box = $null
 $boxHwnd = 0
 $boxHost = ''
 $searched = [DateTime]::MinValue
 $modelSearched = [DateTime]::MinValue
+$usageSearched = [DateTime]::MinValue
 $cachedModel = $null
-$debuggedHwnd = 0
-$lastDebug = $null
+$script:debuggedHwnd = 0
+$script:modelDebuggedHwnd = 0
+$script:lastDebug = $null
 $closeCond = New-Object System.Windows.Automation.AndCondition(
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
   (New-Object System.Windows.Automation.OrCondition(
@@ -186,35 +201,41 @@ function Find-AntigravityBox($hwnd) {
       if ($card) { return $card }
     }
   }
-  foreach ($b in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelCond)) {
+  $bestModelAnchor = $null
+  $bestModelBottom = -1
+  foreach ($b in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelTextCond)) {
     $c = $b.Current
     $r = $c.BoundingRectangle
-    if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop) { continue }
-    if (Match-ModelText $c.Name) {
-      $card = Climb-AntigravityCard $b $rootRect $true
-      if ($card) { return $card }
+    if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop -or $r.Height -gt 72) { continue }
+    if ((Match-ModelText $c.Name) -and $r.Bottom -gt $bestModelBottom) {
+      $bestModelBottom = $r.Bottom
+      $bestModelAnchor = $b
     }
+  }
+  if ($bestModelAnchor) {
+    $card = Climb-AntigravityCard $bestModelAnchor $rootRect $true
+    if ($card) { return $card }
   }
 
   # Log a compact one-time UIA summary per window when nothing matched, so any layout change is diagnosable
-  if ($hwnd -ne $debuggedHwnd) {
-    $debuggedHwnd = $hwnd
-    $samples = @()
+  if ($hwnd -ne $script:debuggedHwnd) {
+    $script:debuggedHwnd = $hwnd
+    $rows = @()
     $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
     foreach ($el in $all) {
-      if ($samples.Count -ge 10) { break }
       $c = $el.Current
       $r = $c.BoundingRectangle
       if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop) { continue }
       $ct = $c.ControlType.ProgrammaticName -replace '^ControlType\.', ''
       if ($ct -in @('Edit','Document','Button','ComboBox','Text','Group')) {
         $nm = ([string]$c.Name) -replace '[\r\n]+', ' '
-        if ($nm.Length -gt 24) { $nm = $nm.Substring(0, 24) }
+        if ($nm.Length -gt 28) { $nm = $nm.Substring(0, 28) }
         $cn = ([string]$c.ClassName)
-        if ($cn.Length -gt 24) { $cn = $cn.Substring(0, 24) }
-        $samples += "$ct($cn|$nm|$([int]$r.Width)x$([int]$r.Height)@$([int]$r.Left),$([int]$r.Top))"
+        if ($cn.Length -gt 20) { $cn = $cn.Substring(0, 20) }
+        $rows += [PSCustomObject]@{ Bottom = [int]$r.Bottom; Text = "$ct($cn|$nm|$([int]$r.Width)x$([int]$r.Height)@$([int]$r.Left),$([int]$r.Top))" }
       }
     }
+    $samples = @($rows | Sort-Object Bottom -Descending | Select-Object -First 10 | ForEach-Object { $_.Text })
     $script:lastDebug = "root=$([int]$rootRect.Width)x$([int]$rootRect.Height) all=$($all.Count) edits=$($edits.Count) docs=$($docs.Count) bottom=[" + ($samples -join '; ') + ']'
   }
   return $null
@@ -222,8 +243,15 @@ function Find-AntigravityBox($hwnd) {
 
 function Match-ModelText($text) {
   if (-not $text) { return $null }
-  $t = ([string]$text).Trim()
-  if ($t.Length -eq 0 -or $t.Length -gt 48 -or $t -match '[\r\n,;!?。，！？；]|https?://|新建|通知|不可用|查看用量') { return $null }
+  $lines = @(([string]$text) -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 0 })
+  if ($lines.Count -eq 1) {
+    $t = $lines[0]
+  } elseif ($lines.Count -eq 2 -and $lines[1] -match '${EFFORT_LINE.source}') {
+    $t = "$($lines[0]) $($lines[1])"
+  } else {
+    return $null
+  }
+  if ($t.Length -eq 0 -or $t.Length -gt 48 -or $t -match '[,;!?。，！？；]|https?://|新建|通知|不可用|查看用量|unavailable|disabled|view usage') { return $null }
   if ($t -match '${MODEL_LABEL.source}') { return $matches[0].Trim() }
   return $null
 }
@@ -240,10 +268,10 @@ function Find-AntigravityModel($hwnd, $boxEl) {
   $bestHit = $null
   $bestBottom = -1
   foreach ($scope in $scopes) {
-    foreach ($el in $scope.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelCond)) {
+    foreach ($el in $scope.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelTextCond)) {
       $c = $el.Current
       $r = $c.BoundingRectangle
-      if ($c.IsOffscreen -or $r.IsEmpty) { continue }
+      if ($c.IsOffscreen -or $r.IsEmpty -or $r.Height -gt 72) { continue }
       $hit = Match-ModelText $c.Name
       if (-not $hit) { $hit = Match-ModelText $c.HelpText }
       if ($hit -and $r.Bottom -gt $bestBottom) {
@@ -254,17 +282,36 @@ function Find-AntigravityModel($hwnd, $boxEl) {
     if ($bestHit) { return $bestHit }
   }
   if (-not $rootRect.IsEmpty) {
-    $minTop = $rootRect.Top + $rootRect.Height * 0.65
-    foreach ($el in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelCond)) {
+    $minTop = $rootRect.Top + $rootRect.Height * 0.72
+    foreach ($el in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelTextCond)) {
       $c = $el.Current
       $r = $c.BoundingRectangle
-      if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop) { continue }
+      if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop -or $r.Height -gt 64 -or $r.Width -gt 420) { continue }
       $hit = Match-ModelText $c.Name
+      if (-not $hit) { $hit = Match-ModelText $c.HelpText }
       if ($hit -and $r.Bottom -gt $bestBottom) {
         $bestBottom = $r.Bottom
         $bestHit = $hit
       }
     }
+  }
+  if (-not $bestHit -and $hwnd -ne $script:modelDebuggedHwnd -and -not $rootRect.IsEmpty) {
+    $script:modelDebuggedHwnd = $hwnd
+    $diagScope = if ($boxEl) { $boxEl } else { $root }
+    $diagMinTop = $rootRect.Top + $rootRect.Height * 0.75
+    $rows = @()
+    foreach ($el in $diagScope.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelTextCond)) {
+      $c = $el.Current
+      $r = $c.BoundingRectangle
+      if ($c.IsOffscreen -or $r.IsEmpty -or (-not $boxEl -and $r.Top -lt $diagMinTop)) { continue }
+      $ct = $c.ControlType.ProgrammaticName -replace '^ControlType\.', ''
+      $nm = ([string]$c.Name) -replace '[\r\n]+', ' '
+      if ($nm.Length -gt 32) { $nm = $nm.Substring(0, 32) }
+      if (-not $nm) { continue }
+      $rows += [PSCustomObject]@{ Bottom = [int]$r.Bottom; Text = "$ct($nm|$([int]$r.Width)x$([int]$r.Height)@$([int]$r.Left),$([int]$r.Top))" }
+    }
+    $samples = @($rows | Sort-Object Bottom -Descending | Select-Object -First 12 | ForEach-Object { $_.Text })
+    $script:lastDebug = "model-miss box=$([bool]$boxEl) items=[" + ($samples -join '; ') + ']'
   }
   return $bestHit
 }
@@ -346,9 +393,13 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     }
     if ($wantModel -and $hostType -eq 'antigravity') {
       $mAge = ([DateTime]::UtcNow - $modelSearched).TotalSeconds
-      if ($hwnd -ne $boxHwnd -or $mAge -ge 0.8) {
+      if ($hwnd -ne $boxHwnd -or $mAge -ge 0.3) {
         $modelSearched = [DateTime]::UtcNow
         $cachedModel = Find-AntigravityModel $hwnd $box
+      }
+      $uAge = ([DateTime]::UtcNow - $usageSearched).TotalSeconds
+      if ($hwnd -ne $boxHwnd -or $uAge -ge 2.0) {
+        $usageSearched = [DateTime]::UtcNow
         $usageTexts = Find-AntigravityUsageTexts $hwnd
         if ($usageTexts) {
           $fields += '"usageTexts":' + (ConvertTo-Json $usageTexts -Compress)
@@ -374,7 +425,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 `
 
 const POLL_MS = 200 // how often to ask while the character follows the box
-const MODEL_ONLY_POLL_MS = 1000 // how often to check model label when snapToBox is off
+const MODEL_ONLY_POLL_MS = 400 // how often to check model label when snapToBox is off
 const STALL_MS = 5000 // an unanswered question this old means the reader is stuck
 const RESTART_MS = 10 * 1000
 const BANNER_FROM = 70 // weekly percent; a little under Claude's 75%, as the widget's figure can lag

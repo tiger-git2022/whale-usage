@@ -9,6 +9,7 @@ const {
   normalizeUsage,
   mergeUsage,
   resolveActiveGroup,
+  pickActiveModel,
   buildRendererPayload,
   parseJsonStdout,
   parseUsagePanelTexts,
@@ -511,4 +512,22 @@ test('parseLanguageServerProcesses reads pid, csrf token and listening ports fro
   )
   assert.deepStrictEqual(parseLanguageServerProcesses('[]'), [])
   assert.deepStrictEqual(parseLanguageServerProcesses('not json'), [])
+})
+
+test('pickActiveModel prefers whichever of UIA or hook observed the latest model change', () => {
+  assert.strictEqual(
+    pickActiveModel({ uiModel: 'Claude Opus 5.5 中', uiModelAt: 2000, hookModel: 'gemini-4-argon-medium', hookUpdatedAt: 1000 }),
+    'Claude Opus 5.5 中',
+  )
+  assert.strictEqual(
+    pickActiveModel({ uiModel: 'Gemini 4 Neon 高', uiModelAt: 1000, hookModel: 'gemini-4-argon-medium', hookUpdatedAt: 2000 }),
+    'gemini-4-argon-medium',
+  )
+  assert.strictEqual(
+    pickActiveModel({ uiModel: 'Gemini 4 Neon 高', uiModelAt: 2000, hookModel: 'gemini-4-argon-medium', hookUpdatedAt: 2000 }),
+    'Gemini 4 Neon 高',
+  )
+  assert.strictEqual(pickActiveModel({ uiModel: null, hookModel: 'gemini-4-argon-medium', hookUpdatedAt: 1000 }), 'gemini-4-argon-medium')
+  assert.strictEqual(pickActiveModel({ usageModel: 'Gemini 3.8 Flash' }), 'Gemini 3.8 Flash')
+  assert.strictEqual(pickActiveModel({}), null)
 })
