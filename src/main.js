@@ -95,6 +95,7 @@ let pendingUpdate = null // the newer release found by the last check
 let updateProgress = null // text while an update downloads
 let weeklyPercent = null // Claude's highest weekly window's use, from the last usage read, or null
 let lastUiModel = null // latest model name read from Antigravity via UI Automation
+let lastUiModelAt = 0 // timestamp when lastUiModel was observed
 let lastUiUsageSignature = null // latest "使用情况" panel snapshot read via UI Automation
 let lastAntigravityPayload = null // latest renderer payload for Antigravity (for menu chips)
 
@@ -216,6 +217,8 @@ function tick() {
   if (seen !== targetSeen) {
     log.info(seen ? `following ${state.window.host} window ${state.window.hwnd} (pid ${state.window.pid})` : 'no host window')
     targetSeen = seen
+    lastUiModel = null
+    lastUiModelAt = 0
   }
   if (!state.window || state.minimized) return setShown(false)
 
@@ -244,6 +247,7 @@ function tick() {
     if (uiModel && uiModel !== lastUiModel) {
       log.info('antigravity ui model:', uiModel)
       lastUiModel = uiModel
+      lastUiModelAt = Date.now()
       sendUsage()
     }
     const uiTexts = composer.usageTextsOf(state.window.hwnd)
@@ -316,7 +320,13 @@ function readAntigravityUsage() {
   const fileUsage = antigravity.readUsageFile()
   const merged = antigravity.mergeUsage(fileUsage, antigravity.latest())
   const hookState = antigravity.readState()
-  const activeModel = lastUiModel || hookState?.modelName || merged?.activeModel || null
+  const activeModel = antigravity.pickActiveModel({
+    uiModel: lastUiModel,
+    uiModelAt: lastUiModelAt,
+    hookModel: hookState?.modelName,
+    hookUpdatedAt: hookState?.updatedAt,
+    usageModel: merged?.activeModel,
+  })
   const pollerState = antigravity.state()
   const payload = antigravity.buildRendererPayload({
     usage: merged,
