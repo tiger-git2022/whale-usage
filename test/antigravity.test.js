@@ -17,6 +17,7 @@ const { handleEvent } = require('../antigravity-plugin/scripts/hook')
 
 test('classifyModel maps Gemini, Flash, Claude and GPT variants to expected groups', () => {
   assert.strictEqual(classifyModel('Gemini 4 Neon (High)'), 'gemini_pro')
+  assert.strictEqual(classifyModel('Gemini 4 Argon (Medium)'), 'gemini_pro')
   assert.strictEqual(classifyModel('gemini-4-neon-high'), 'gemini_pro')
   assert.strictEqual(classifyModel('Gemini 4 Neon 高'), 'gemini_pro')
   assert.strictEqual(classifyModel('Gemini 2.5 Pro'), 'gemini_pro')

@@ -543,7 +543,7 @@ function openMenu(at) {
     'web:login': () => webusage.login(),
     'web:logout': confirmLogout,
     'ag:refresh': () => antigravity.refreshNow(),
-    'ag:login': () => antigravity.login(),
+    'ag:login': () => antigravity.login(url => shell.openExternal(url)),
     'ag:logout': () => antigravity.logout(),
     'ag:help': showAntigravityHelp,
     'ag:toggle': () => {

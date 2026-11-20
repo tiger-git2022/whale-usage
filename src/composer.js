@@ -356,11 +356,12 @@ let lastWeekly = null
 function start() {
   if (Date.now() - lastStart < RESTART_MS) return
   lastStart = Date.now()
-  const encoded = Buffer.from(SCRIPT, 'utf16le').toString('base64')
-  // Not detached: windowsHide keeps it without a console window, and it ends with the widget.
-  child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+  // Pass SCRIPT via environment variable instead of -EncodedCommand so it never hits Windows's
+  // 32,767-char command-line limit (ENAMETOOLONG) and is unaffected by PowerShell ExecutionPolicy.
+  child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Invoke-Expression $env:WHALE_UIA_SCRIPT'], {
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, WHALE_UIA_SCRIPT: SCRIPT },
   })
   const proc = child
   log.info('input box reader started', proc.pid)
