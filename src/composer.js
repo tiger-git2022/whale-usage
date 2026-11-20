@@ -24,7 +24,7 @@ const LIMIT_BANNER = /每周.{0,12}限额|weekly.{0,24}limit/i
 const isLimitBanner = text => LIMIT_BANNER.test(text)
 
 // Model selector button/label patterns near Antigravity's composer (no single quotes).
-const MODEL_LABEL = /\b(?:gemini|claude|gpt|sonnet|opus|haiku|o[134])(?:[\w.\-/+\s()]*[\w)])?/i
+const MODEL_LABEL = /\b(?:gemini|claude|gpt|sonnet|opus|haiku|o[134])(?:[\w.\-/+\s()高中低]*[\w)高中低])?/i
 
 function isModelLabel(text) {
   if (typeof text !== 'string') return false
@@ -55,6 +55,7 @@ $AE = [System.Windows.Automation.AutomationElement]
 $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
 $editCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
 $docCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
+$textCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text)
 $modelCond = New-Object System.Windows.Automation.OrCondition(
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::ComboBox)),
@@ -65,6 +66,8 @@ $boxHost = ''
 $searched = [DateTime]::MinValue
 $modelSearched = [DateTime]::MinValue
 $cachedModel = $null
+$debuggedHwnd = 0
+$lastDebug = $null
 $closeCond = New-Object System.Windows.Automation.AndCondition(
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
   (New-Object System.Windows.Automation.OrCondition(
@@ -113,6 +116,26 @@ function Find-ClaudeBox($hwnd) {
   return $best
 }
 
+function Climb-AntigravityCard($anchor, $rootRect, $requireBigger) {
+  $anchorRect = $anchor.Current.BoundingRectangle
+  $anchorHeight = $anchorRect.Height
+  $fallback = if ($requireBigger) { $null } else { $anchor }
+  $cur = $anchor
+  for ($i = 0; $i -lt 10; $i++) {
+    $cur = $walker.GetParent($cur)
+    if (-not $cur) { break }
+    $c = $cur.Current
+    $r = $c.BoundingRectangle
+    if ($r.IsEmpty -or $r.Width -gt $rootRect.Width * 0.95 -or $r.Height -gt $rootRect.Height * 0.55) { break }
+    if ($r.Width -lt 240 -or $r.Height -lt 48) { continue }
+    if ($c.ClassName -match '(^|\s)rounded|composer|prompt|chat-input|input-box' -and $r.Height -ge $anchorHeight + 8) { return $cur }
+    if (-not $fallback -and $r.Height -ge [Math]::Max($anchorHeight + 16, 56) -and $r.Height -le [Math]::Min($anchorHeight + 180, $rootRect.Height * 0.45)) {
+      $fallback = $cur
+    }
+  }
+  return $fallback
+}
+
 function Find-AntigravityBox($hwnd) {
   $root = $AE::FromHandle([IntPtr]$hwnd)
   $rootRect = $root.Current.BoundingRectangle
@@ -120,21 +143,23 @@ function Find-AntigravityBox($hwnd) {
   $best = $null
   $bestScore = -1
   $candidates = @()
-  foreach ($e in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCond)) { $candidates += $e }
-  if ($candidates.Count -eq 0) {
-    foreach ($d in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $docCond)) {
-      $cn = [string]$d.Current.ClassName
-      if ($cn -match 'ProseMirror|Lexical|tiptap|composer|prompt|chat') { $candidates += $d }
+  $edits = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCond)
+  foreach ($e in $edits) { $candidates += $e }
+  $docs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $docCond)
+  foreach ($d in $docs) {
+    $r = $d.Current.BoundingRectangle
+    if (-not $r.IsEmpty -and $r.Width -ge 160 -and $r.Width -lt $rootRect.Width * 0.95 -and $r.Height -ge 16 -and $r.Height -lt $rootRect.Height * 0.55) {
+      $candidates += $d
     }
   }
   foreach ($e in $candidates) {
     $c = $e.Current
     $r = $c.BoundingRectangle
-    if ($c.IsOffscreen -or $r.IsEmpty -or $r.Width -lt 160 -or $r.Height -lt 16) { continue }
+    if ($c.IsOffscreen -or $r.IsEmpty -or $r.Width -lt 140 -or $r.Height -lt 14) { continue }
     if ($r.Height -gt $rootRect.Height * 0.6) { continue }
     $meta = ([string]$c.ClassName + ' ' + [string]$c.Name + ' ' + [string]$c.HelpText + ' ' + [string]$c.AutomationId)
-    $looksChat = $meta -match 'ProseMirror|Lexical|tiptap|composer|prompt|message|chat|ask|anything|询问|输入|消息|对话'
-    $inLowerHalf = $r.Top -ge ($rootRect.Top + $rootRect.Height * 0.38)
+    $looksChat = $meta -match 'ProseMirror|Lexical|tiptap|composer|prompt|message|chat|ask|anything|询问|输入|任何问题|提及|触发|消息|对话'
+    $inLowerHalf = $r.Top -ge ($rootRect.Top + $rootRect.Height * 0.35)
     if (-not $looksChat -and -not $inLowerHalf) { continue }
     $score = 0
     if ($looksChat) { $score += 10000 }
@@ -146,18 +171,51 @@ function Find-AntigravityBox($hwnd) {
       $best = $e
     }
   }
-  if (-not $best) { return $null }
-  $editHeight = $best.Current.BoundingRectangle.Height
-  $cur = $best
-  for ($i = 0; $i -lt 8; $i++) {
-    $cur = $walker.GetParent($cur)
-    if (-not $cur) { break }
-    $c = $cur.Current
+  if ($best) { return Climb-AntigravityCard $best $rootRect $false }
+
+  # Fallback: anchor on Antigravity 2.0's bottom composer placeholder text or model picker button
+  $minTop = $rootRect.Top + $rootRect.Height * 0.48
+  foreach ($t in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCond)) {
+    $c = $t.Current
     $r = $c.BoundingRectangle
-    if ($r.IsEmpty -or $r.Width -gt $rootRect.Width * 0.94 -or $r.Height -gt $rootRect.Height * 0.65) { break }
-    if ($c.ClassName -match '(^|\s)rounded|composer|prompt|chat-input' -and $r.Height -ge $editHeight + 8) { return $cur }
+    if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop) { continue }
+    if ([string]$c.Name -match '输入任何问题|Ask anything|@ 提及|@ to mention|触发操作|for workflows') {
+      $card = Climb-AntigravityCard $t $rootRect $true
+      if ($card) { return $card }
+    }
   }
-  return $best
+  foreach ($b in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelCond)) {
+    $c = $b.Current
+    $r = $c.BoundingRectangle
+    if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop) { continue }
+    if (Match-ModelText $c.Name) {
+      $card = Climb-AntigravityCard $b $rootRect $true
+      if ($card) { return $card }
+    }
+  }
+
+  # Log a compact one-time UIA summary per window when nothing matched, so any layout change is diagnosable
+  if ($hwnd -ne $debuggedHwnd) {
+    $debuggedHwnd = $hwnd
+    $samples = @()
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($el in $all) {
+      if ($samples.Count -ge 10) { break }
+      $c = $el.Current
+      $r = $c.BoundingRectangle
+      if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop) { continue }
+      $ct = $c.ControlType.ProgrammaticName -replace '^ControlType\.', ''
+      if ($ct -in @('Edit','Document','Button','ComboBox','Text','Group')) {
+        $nm = ([string]$c.Name).Replace([char]13,'').Replace([char]10,'')
+        if ($nm.Length -gt 24) { $nm = $nm.Substring(0, 24) }
+        $cn = ([string]$c.ClassName)
+        if ($cn.Length -gt 24) { $cn = $cn.Substring(0, 24) }
+        $samples += "$ct($cn|$nm|$([int]$r.Width)x$([int]$r.Height)@$([int]$r.Left),$([int]$r.Top))"
+      }
+    }
+    $script:lastDebug = "root=$([int]$rootRect.Width)x$([int]$rootRect.Height) all=$($all.Count) edits=$($edits.Count) docs=$($docs.Count) bottom=[" + ($samples -join '; ') + ']'
+  }
+  return $null
 }
 
 function Match-ModelText($text) {
@@ -249,6 +307,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         $fields += '"model":' + (ConvertTo-Json ([string]$cachedModel) -Compress)
       }
     }
+    if ($script:lastDebug) {
+      $fields += '"debug":' + (ConvertTo-Json ([string]$script:lastDebug) -Compress)
+      $script:lastDebug = $null
+    }
     $out = '{' + ($fields -join ',') + '}'
   } catch {
     $box = $null
@@ -338,6 +400,7 @@ function answer(line) {
     if (value.error !== lastError) log.warn('input box lookup failed:', value.error)
     lastError = value.error
   } else lastError = null
+  if (value.debug) log.info('uia diagnostic:', value.debug)
   if (value.dismissed) bannerDismissed = { at: Date.now(), weeklyPercent: lastWeekly }
   if (value.dismissed) log.info('closed the weekly limit banner:', value.dismissed)
   const rect = Number.isFinite(value.x) && value.w > 0 && value.h > 0

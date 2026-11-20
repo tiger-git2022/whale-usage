@@ -418,15 +418,27 @@ function isCommandNotFound(err, stderr) {
   )
 }
 
-// Polls an optional external quota CLI (default `antigravity-usage quota --json`).
+function isLoginRequired(err, stdout, stderr) {
+  const msg = `${stdout || ''} ${stderr || ''} ${err?.message || ''}`.toLowerCase()
+  return (
+    msg.includes('not logged in') ||
+    msg.includes('antigravity-usage login') ||
+    msg.includes('noauthmethodavailable') ||
+    msg.includes('no accounts') ||
+    msg.includes('authentication required')
+  )
+}
+
+// Polls an optional external quota CLI (default `antigravity-usage quota --json --refresh`).
 let command = DEFAULT_COMMAND
 let intervalMs = DEFAULT_INTERVAL_SEC * 1000
 let enabled = true
-let status = 'idle' // 'idle' | 'ok' | 'missing-cli' | 'error' | 'disabled'
+let status = 'idle' // 'idle' | 'ok' | 'missing-cli' | 'needs-login' | 'logging-in' | 'error' | 'disabled'
 let lastError = null
 let latestCli = null
 let timer = null
 let running = false
+let loggingIn = false
 let lastRunAt = 0
 let onChange = () => {}
 
@@ -434,6 +446,52 @@ function scheduleNext(delay) {
   clearTimeout(timer)
   if (!enabled || !command) return
   timer = setTimeout(() => runOnce(), delay)
+}
+
+function runAntigravityCli(args, timeoutMs, callback) {
+  const entry = findAntigravityUsageEntry()
+  const opts = { windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024 }
+  if (entry && process.versions.electron) {
+    execFile(process.execPath, [entry, ...args], { ...opts, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }, callback)
+    return
+  }
+  exec(['antigravity-usage', ...args].join(' '), opts, callback)
+}
+
+// Opens the browser via `antigravity-usage login` (using Electron's bundled Node) and refreshes quota on success.
+function login() {
+  if (loggingIn) return
+  loggingIn = true
+  status = 'logging-in'
+  lastError = null
+  onChange()
+  log.info('starting antigravity-usage login')
+  runAntigravityCli(['login'], 5 * 60 * 1000, (err, stdout, stderr) => {
+    loggingIn = false
+    if (err) {
+      const msg = (stderr || stdout || err.message || 'login failed').trim().slice(0, 180)
+      log.warn('antigravity-usage login failed:', msg)
+      status = isCommandNotFound(err, stderr) ? 'missing-cli' : 'error'
+      lastError = msg
+      onChange()
+      return
+    }
+    log.info('antigravity-usage login succeeded')
+    status = 'idle'
+    lastError = null
+    onChange()
+    runOnce({ force: true })
+  })
+}
+
+function logout() {
+  runAntigravityCli(['logout', '--all'], CMD_TIMEOUT_MS, () => {
+    latestCli = null
+    status = 'needs-login'
+    lastError = null
+    log.info('signed out of antigravity-usage')
+    onChange()
+  })
 }
 
 // Finds globally installed antigravity-usage's JS entry point so Electron can run it directly
@@ -490,7 +548,7 @@ function runOnce({ force = false } = {}) {
     return
   }
   const now = Date.now()
-  if (running) return
+  if (running || loggingIn) return
   if (!force && now - lastRunAt < REFRESH_COOLDOWN_MS) return
   running = true
   lastRunAt = now
@@ -507,7 +565,15 @@ function runOnce({ force = false } = {}) {
         scheduleNext(MISSING_RETRY_MS)
         return
       }
-      const message = (stderr || err.message || 'unknown error').trim().slice(0, 180)
+      if (isLoginRequired(err, stdout, stderr)) {
+        if (status !== 'needs-login') log.info('antigravity quota needs Google login (antigravity-usage login)')
+        status = 'needs-login'
+        lastError = '需要登录一次 Google 账号'
+        onChange()
+        scheduleNext(MISSING_RETRY_MS)
+        return
+      }
+      const message = (stderr || stdout || err.message || 'unknown error').trim().slice(0, 180)
       if (message !== lastError) log.warn('antigravity quota command failed:', message)
       status = 'error'
       lastError = message
@@ -579,9 +645,12 @@ module.exports = {
   readUsageFile,
   buildRendererPayload,
   parseJsonStdout,
+  isLoginRequired,
   start,
   configure,
   stop,
+  login,
+  logout,
   refreshNow: () => runOnce({ force: true }),
   state: () => ({ status, error: lastError, command, enabled }),
   latest: () => latestCli,
