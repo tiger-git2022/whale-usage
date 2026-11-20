@@ -347,6 +347,12 @@ function antigravityQuotaEntry() {
   if (st.status === 'missing-cli') {
     return { type: 'item', id: 'ag:help', icon: 'E946', text: '反重力额度：未检测到 CLI（点此查看说明）' }
   }
+  if (st.status === 'logging-in') {
+    return { type: 'item', id: 'none', icon: 'E774', text: '正在浏览器中登录 Google 账号…', enabled: false }
+  }
+  if (st.status === 'needs-login') {
+    return { type: 'item', id: 'ag:login', icon: 'E774', text: '登录 Google 账号，读取反重力额度…' }
+  }
   if (st.status === 'error') {
     return { type: 'item', id: 'ag:refresh', icon: 'E72C', text: '反重力额度刷新失败，点此重试' }
   }
@@ -537,6 +543,8 @@ function openMenu(at) {
     'web:login': () => webusage.login(),
     'web:logout': confirmLogout,
     'ag:refresh': () => antigravity.refreshNow(),
+    'ag:login': () => antigravity.login(),
+    'ag:logout': () => antigravity.logout(),
     'ag:help': showAntigravityHelp,
     'ag:toggle': () => {
       setSetting('antigravityQuotaEnabled', !settings.antigravityQuotaEnabled)

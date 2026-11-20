@@ -125,6 +125,12 @@ function emptyMessageFor(u) {
   if (u?.quotaStatus === 'missing-cli') {
     return '未检测到 antigravity-usage。运行 npm i -g antigravity-usage，或在右键菜单配置外部命令 / 写入 usage.json。'
   }
+  if (u?.quotaStatus === 'needs-login') {
+    return '需要登录一次 Google 账号以读取反重力额度：右键点击鲸鱼，选择「登录 Google 账号，读取反重力额度…」。'
+  }
+  if (u?.quotaStatus === 'logging-in') {
+    return '正在浏览器中登录 Google 账号，完成后额度会自动出现…'
+  }
   if (u?.quotaStatus === 'error') {
     return `读取 Antigravity 额度失败：${u.quotaError || '请查看日志'}`
   }

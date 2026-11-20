@@ -11,11 +11,14 @@ const {
   resolveActiveGroup,
   buildRendererPayload,
   parseJsonStdout,
+  isLoginRequired,
 } = require('../src/antigravity')
 const { handleEvent } = require('../antigravity-plugin/scripts/hook')
 
 test('classifyModel maps Gemini, Flash, Claude and GPT variants to expected groups', () => {
   assert.strictEqual(classifyModel('Gemini 4 Neon (High)'), 'gemini_pro')
+  assert.strictEqual(classifyModel('gemini-4-neon-high'), 'gemini_pro')
+  assert.strictEqual(classifyModel('Gemini 4 Neon 高'), 'gemini_pro')
   assert.strictEqual(classifyModel('Gemini 2.5 Pro'), 'gemini_pro')
   assert.strictEqual(classifyModel('Gemini 2.5 Flash'), 'gemini_flash')
   assert.strictEqual(classifyModel('Gemini Flash Lite'), 'gemini_flash')
@@ -202,6 +205,11 @@ test('mergeUsage keeps higher percent within the same window and newer reading a
     groups: [{ id: 'gemini', limits: [{ kind: 'five_hour', percentUsed: 5, resetsAt: '2026-11-21T10:00:00.000Z' }] }],
   })
   assert.strictEqual(mergeUsage(file, cliReset).groups.find(g => g.id === 'gemini').limits[0].percentUsed, 5)
+})
+
+test('isLoginRequired recognizes antigravity-usage not-logged-in output', () => {
+  assert.ok(isLoginRequired(null, '', 'Unable to fetch quota: Antigravity is not running and you are not logged in.\nLogin with: antigravity-usage login'))
+  assert.ok(!isLoginRequired(null, '', 'ETIMEDOUT'))
 })
 
 test('parseJsonStdout tolerates leading warnings and ANSI escapes', () => {

@@ -35,6 +35,7 @@ test('bannerDue waits for a high weekly figure, spaces checks, and waits for mor
 
 test('isModelLabel and extractModelLabel recognize Antigravity model picker labels', () => {
   assert.strictEqual(extractModelLabel('Gemini 4 Neon (High)'), 'Gemini 4 Neon (High)')
+  assert.strictEqual(extractModelLabel('Gemini 4 Neon 高'), 'Gemini 4 Neon 高')
   assert.strictEqual(extractModelLabel('Claude Sonnet 4.6'), 'Claude Sonnet 4.6')
   assert.strictEqual(extractModelLabel('Model: Gemini 2.5 Flash'), 'Gemini 2.5 Flash')
   assert.strictEqual(extractModelLabel('GPT-OSS 120B'), 'GPT-OSS 120B')
