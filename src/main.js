@@ -355,8 +355,11 @@ function webUsageEntry() {
 
 function antigravityQuotaEntry() {
   const st = antigravity.state()
-  if (!settings.antigravityQuotaEnabled || !settings.antigravityQuotaCommand) {
-    return { type: 'item', id: 'ag:toggle', icon: 'E72C', text: '启用反重力外部额度命令', checked: false }
+  if (!settings.antigravityQuotaEnabled) {
+    return { type: 'item', id: 'ag:toggle', icon: 'E72C', text: '启用反重力额度读取', checked: false }
+  }
+  if (st.status === 'not-running') {
+    return { type: 'item', id: 'ag:refresh', icon: 'E72C', text: '未检测到反重力，启动后会自动读取（点此重试）' }
   }
   if (st.status === 'missing-cli') {
     return { type: 'item', id: 'ag:help', icon: 'E946', text: '反重力额度：未检测到 CLI（点此查看说明）' }
@@ -378,11 +381,13 @@ async function showAntigravityHelp() {
   const { response } = await dialog.showMessageBox({
     type: 'info',
     title: '反重力（Antigravity）额度来源',
-    message: '未检测到外部额度命令',
+    message: '暂时读不到反重力额度',
     detail:
-      `当前配置的命令：\n${cmd}\n\n` +
-      `方式 1（推荐）：安装社区开源 CLI：\n  npm i -g antigravity-usage\n装好后点「重新检测」即可实时显示 Gemini / Claude 各分组额度。\n\n` +
-      `方式 2：也可以由你自己的脚本向以下文件写入标准 JSON：\n  ${antigravity.usagePath()}\n\n` +
+      `Whale Usage 会直接读取反重力 2.0 自带的本地额度接口（language_server.exe），\n` +
+      `包括每周限额和 5 小时限额，不需要安装任何第三方 CLI。\n\n` +
+      `请先确认反重力正在运行；如果刚启动，点「重新检测」即可。\n\n` +
+      `备用方式 1（可选）：安装社区 CLI 后会把 \n  ${cmd}\n  作为兜底来源。\n` +
+      `备用方式 2：也可以由你自己的脚本向以下文件写入标准 JSON：\n  ${antigravity.usagePath()}\n\n` +
       `如需修改外部命令，可编辑 settings.json 中的 antigravityQuotaCommand。`,
     buttons: ['重新检测', '打开配置文件夹', '关闭'],
     defaultId: 0,

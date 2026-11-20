@@ -12,6 +12,9 @@ const {
   buildRendererPayload,
   parseJsonStdout,
   parseUsagePanelTexts,
+  parseQuotaSummary,
+  parseUserStatus,
+  parseLanguageServerProcesses,
   isLoginRequired,
 } = require('../src/antigravity')
 const { handleEvent } = require('../antigravity-plugin/scripts/hook')
@@ -333,4 +336,179 @@ test('antigravity hook script writes active model, wait state, and turn deltas',
     else process.env.ANTIGRAVITY_WHALE_DIR = prevEnv
     fs.rmSync(tmp, { recursive: true, force: true })
   }
+})
+
+test('parseQuotaSummary reads Antigravity 2.0 weekly and 5-hour buckets for every group', () => {
+  const now = Date.parse('2026-11-20T18:00:00.000Z')
+  const parsed = parseQuotaSummary(
+    {
+      response: {
+        groups: [
+          {
+            displayName: 'Gemini Models',
+            description:
+              'Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen, Orchestrator (Neon), Gemini 3.8 Flash',
+            buckets: [
+              {
+                bucketId: 'gemini-weekly',
+                displayName: 'Weekly Limit Remaining',
+                window: 'weekly',
+                remainingFraction: 0.69737995,
+                resetTime: '2026-11-27T14:56:20Z',
+              },
+              {
+                bucketId: 'gemini-5h',
+                displayName: 'Five Hour Limit Remaining',
+                window: '5h',
+                remainingFraction: 0.0037382,
+                resetTime: '2026-11-20T19:56:20Z',
+              },
+            ],
+          },
+          {
+            displayName: 'Claude and GPT models',
+            description: 'Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B',
+            buckets: [
+              {
+                bucketId: '3p-weekly',
+                displayName: 'Weekly Limit Remaining',
+                window: 'weekly',
+                remainingFraction: 0.483768,
+                resetTime: '2026-11-27T18:26:45Z',
+              },
+              {
+                bucketId: '3p-5h',
+                displayName: 'Five Hour Limit Remaining',
+                window: '5h',
+                remainingFraction: 0.0008,
+                resetTime: '2026-11-20T23:26:45Z',
+              },
+            ],
+          },
+          {
+            displayName: 'Gemini 4 Argon',
+            description: 'Models within this group: Gemini 4 Argon',
+            buckets: [
+              {
+                bucketId: 'gemini-argon-wtu-weekly',
+                displayName: 'Gemini 4 Argon Weekly Limit',
+                window: 'weekly',
+                remainingFraction: 0.5544509,
+                resetTime: '2026-11-27T16:24:17Z',
+              },
+            ],
+          },
+        ],
+      },
+    },
+    now,
+  )
+  assert.ok(parsed)
+  assert.deepStrictEqual(
+    parsed.groups.map(g => g.id),
+    ['gemini', 'gemini_argon', 'claude'],
+  )
+  const gem = parsed.groups[0]
+  const argon = parsed.groups[1]
+  const cla = parsed.groups[2]
+  assert.ok(gem.models.includes('Gemini 4 Neon'))
+  assert.deepStrictEqual(
+    gem.limits.map(l => ({ kind: l.kind, pct: l.percentUsed, reset: l.resetsAt })),
+    [
+      { kind: 'five_hour', pct: 99.6, reset: '2026-11-20T19:56:20.000Z' },
+      { kind: 'seven_day', pct: 30.3, reset: '2026-11-27T14:56:20.000Z' },
+    ],
+  )
+  assert.deepStrictEqual(
+    cla.limits.map(l => ({ kind: l.kind, pct: l.percentUsed })),
+    [
+      { kind: 'five_hour', pct: 99.9 },
+      { kind: 'seven_day', pct: 51.6 },
+    ],
+  )
+  assert.deepStrictEqual(
+    argon.limits.map(l => ({ kind: l.kind, pct: l.percentUsed })),
+    [{ kind: 'seven_day', pct: 44.6 }],
+  )
+  assert.strictEqual(resolveActiveGroup(parsed.groups, 'Gemini 4 Argon 中').id, 'gemini_argon')
+  assert.strictEqual(resolveActiveGroup(parsed.groups, 'Claude Opus 5.5 中').id, 'claude')
+  assert.strictEqual(resolveActiveGroup(parsed.groups, 'GPT-OSS 120B').id, 'claude')
+})
+
+test('parseQuotaSummary accepts snake_case buckets and skips disabled ones', () => {
+  const parsed = parseQuotaSummary({
+    groups: [
+      {
+        display_name: 'Gemini Models',
+        buckets: [
+          { bucket_id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.5, reset_time: '2026-11-27T14:56:20Z' },
+          { bucket_id: 'gemini-5h', window: '5h', remaining_fraction: 0.25, disabled: true },
+        ],
+      },
+    ],
+  })
+  assert.ok(parsed)
+  assert.deepStrictEqual(
+    parsed.groups[0].limits.map(l => ({ kind: l.kind, pct: l.percentUsed })),
+    [{ kind: 'seven_day', pct: 50 }],
+  )
+})
+
+test('parseUserStatus falls back to per-model remainingFraction snapshots', () => {
+  const now = Date.parse('2026-11-20T18:00:00.000Z')
+  const parsed = parseUserStatus(
+    {
+      response: {
+        userStatus: {
+          cascadeModelConfigData: {
+            clientModelConfigs: [
+              {
+                label: 'Gemini 4 Neon (High)',
+                modelId: 'gemini-4-neon-high',
+                quotaInfo: { remainingFraction: 0.8, resetTime: '2026-11-20T22:00:00Z' },
+              },
+              {
+                label: 'Claude Opus 5.5',
+                modelId: 'claude-opus-5-5',
+                quotaInfo: { remainingFraction: 0.4, resetTime: '2026-11-20T23:00:00Z' },
+              },
+              {
+                label: 'Gemini 2.5 Flash Autocomplete',
+                modelId: 'gemini-2.5-flash',
+                quotaInfo: { remainingFraction: 0.1 },
+              },
+            ],
+          },
+        },
+      },
+    },
+    now,
+  )
+  assert.ok(parsed)
+  assert.strictEqual(parsed.groups.length, 2)
+  assert.strictEqual(parsed.groups.find(g => g.id === 'gemini').limits[0].percentUsed, 20)
+  assert.strictEqual(parsed.groups.find(g => g.id === 'claude').limits[0].percentUsed, 60)
+  assert.strictEqual(parseUserStatus({ response: { userStatus: {} } }), null)
+})
+
+test('parseLanguageServerProcesses reads pid, csrf token and listening ports from discovery JSON', () => {
+  const single = parseLanguageServerProcesses(
+    JSON.stringify({ pid: 14648, token: 'd0ad9d01-bba9-428e-8e07-2f159e0c322f', ports: [2556, 2557, 4153] }),
+  )
+  assert.deepStrictEqual(single, [
+    { pid: 14648, token: 'd0ad9d01-bba9-428e-8e07-2f159e0c322f', ports: [2556, 2557, 4153] },
+  ])
+  assert.deepStrictEqual(
+    parseLanguageServerProcesses(
+      '\uFEFF' +
+        JSON.stringify([
+          { pid: 1, token: 'abc', ports: [2556, 2556, 0, 70000] },
+          { pid: 2, token: '', ports: [2557] },
+          null,
+        ]),
+    ),
+    [{ pid: 1, token: 'abc', ports: [2556] }],
+  )
+  assert.deepStrictEqual(parseLanguageServerProcesses('[]'), [])
+  assert.deepStrictEqual(parseLanguageServerProcesses('not json'), [])
 })
