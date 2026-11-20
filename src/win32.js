@@ -1,4 +1,4 @@
-// Finds the Claude desktop app's main window and reads its position and state.
+// Finds the Claude or Antigravity desktop app's main window and reads its position and state.
 // Uses plain Win32 calls through koffi, so no native module has to be compiled.
 
 const koffi = require('koffi')
@@ -57,11 +57,23 @@ function exePathOf(pid) {
   return exePath
 }
 
-// The Claude desktop app is an Electron app named Claude.exe. The Claude Code CLI is
-// also claude.exe but has no window of this class, so the class filter keeps it out.
-function isClaudeApp(pid) {
-  const exePath = exePathOf(pid).toLowerCase()
-  return exePath.endsWith('\\claude.exe') && !exePath.includes('\\.local\\bin\\')
+// Identifies supported Electron desktop apps from their executable path.
+// Claude Code CLI is also named claude.exe under .local\bin, so exclude that path.
+function hostOfExePath(exePath) {
+  const lower = String(exePath || '').toLowerCase()
+  if (lower.endsWith('\\claude.exe') && !lower.includes('\\.local\\bin\\')) return 'claude'
+  if (lower.endsWith('\\antigravity.exe')) return 'antigravity'
+  return null
+}
+
+function hostMatchesMode(host, mode) {
+  if (!host) return false
+  if (!mode || mode === 'auto') return true
+  return host === mode
+}
+
+function hostOfPid(pid) {
+  return hostOfExePath(exePathOf(pid))
 }
 
 function isCloaked(hwnd) {
@@ -82,23 +94,24 @@ function className(hwnd) {
   return buf.toString('utf16le', 0, n * 2)
 }
 
-// A visible, unowned, titled Claude app window: a chat window, not a popup or menu.
-function asClaudeWindow(hwnd) {
+// A visible, unowned, titled desktop window of a supported host: a chat window, not a popup or menu.
+function asTargetWindow(hwnd, mode = 'auto') {
   if (!hwnd || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) || GetWindowTextLengthW(hwnd) === 0) return null
   if (className(hwnd) !== 'Chrome_WidgetWin_1') return null
   const pid = processIdOf(hwnd)
-  return isClaudeApp(pid) ? { hwnd, pid } : null
+  const host = hostOfPid(pid)
+  return hostMatchesMode(host, mode) ? { hwnd, pid, host } : null
 }
 
-// The largest Claude window, for when none is in front.
-function findClaudeWindow() {
+// The largest matching desktop window, for when none is in front.
+function findTargetWindow(mode = 'auto') {
   let best = null
   let bestArea = 0
   let hwnd = 0
   for (let i = 0; i < 500; i++) {
     hwnd = FindWindowExW(0, hwnd, 'Chrome_WidgetWin_1', null)
     if (!hwnd) break
-    const candidate = asClaudeWindow(hwnd)
+    const candidate = asTargetWindow(hwnd, mode)
     if (!candidate) continue
     const r = frameRect(hwnd)
     const area = (r.right - r.left) * (r.bottom - r.top)
@@ -110,24 +123,30 @@ function findClaudeWindow() {
   return best
 }
 
-// What the widget needs each tick: which Claude window to sit on, where it is, and whether
-// it is on screen and in front. With several Claude windows, the one in front wins.
-function claudeState(cached, ownPid) {
+// What the widget needs each tick: which host window to sit on, where it is, and whether
+// it is on screen and in front. With several windows (Claude / Antigravity), the one in front wins.
+function targetState(cached, ownPid, mode = 'auto') {
   const foreground = GetForegroundWindow()
   const foregroundPid = foreground ? processIdOf(foreground) : 0
-  const inFront = asClaudeWindow(foreground)
-  const stillThere = cached && IsWindow(cached.hwnd) && IsWindowVisible(cached.hwnd) ? cached : null
-  const win = inFront ?? stillThere ?? findClaudeWindow()
+  const inFront = asTargetWindow(foreground, mode)
+  const stillThere =
+    cached && hostMatchesMode(cached.host, mode) && IsWindow(cached.hwnd) && IsWindowVisible(cached.hwnd) ? cached : null
+  const win = inFront ?? stillThere ?? findTargetWindow(mode)
   if (!win) return { window: null }
   const minimized = IsIconic(win.hwnd) || isCloaked(win.hwnd)
+  const hostInFront = foregroundPid === win.pid
   return {
     window: win,
     rect: frameRect(win.hwnd),
     minimized,
-    claudeInFront: foregroundPid === win.pid,
+    hostInFront,
+    claudeInFront: hostInFront,
     selfInFront: foregroundPid === ownPid,
   }
 }
+
+const findClaudeWindow = () => findTargetWindow('claude')
+const claudeState = (cached, ownPid) => targetState(cached, ownPid, 'claude')
 
 // Windows 11 rounds the corners of a frameless window only when asked; Windows 10 ignores this.
 function roundCorners(handleBuffer) {
@@ -135,4 +154,4 @@ function roundCorners(handleBuffer) {
   DwmSetWindowAttributeInt(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, [DWMWCP_ROUND], 4)
 }
 
-module.exports = { claudeState, findClaudeWindow, roundCorners }
+module.exports = { targetState, findTargetWindow, claudeState, findClaudeWindow, hostOfExePath, roundCorners }

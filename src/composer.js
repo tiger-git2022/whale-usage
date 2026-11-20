@@ -1,18 +1,17 @@
-// Finds the input box (the composer) in the Claude window, so the character can sit on top of it.
+// Finds the input box (the composer) in the Claude or Antigravity window, so the character can sit
+// on top of it, and for Antigravity also reads the active model label near the composer.
 //
-// Claude's window exposes its page through Windows UI Automation. A hidden PowerShell process reads it:
-// the widget writes a window handle on a line, and it answers with the box's screen rectangle in
-// physical pixels, as JSON on a line: {"x","y","w","h"}, {} when there is no box, or {"error"}.
-// The box is the rounded frame around the prompt editor (a ProseMirror editor), which grows as the
-// prompt gets longer. With panes side by side, it is the rightmost one, next to where the character sits.
+// Electron windows expose their page through Windows UI Automation. A hidden PowerShell process
+// reads it: the widget writes a request line:
+//   "<hwnd> <box 0|1> <dismiss 0|1> <host claude|antigravity> <model 0|1>"
+// and it answers with JSON on a line: {"x","y","w","h","model","dismissed"}, {}, or {"error"}.
 //
-// The same process also closes the "approaching your weekly limit" banner Claude shows above the input
-// box: a status bar with the message, a "get more usage" button and a close button. When asked, it looks
-// for a close button whose status bar says the weekly limit, and presses it through UI Automation (no
-// mouse movement). The question then carries flags: "<hwnd> <box 0|1> <dismiss 0|1>", and an answer may
-// add "dismissed" with the banner's text. Claude shows the banner from about 75% of the weekly limit, so
-// the widget only asks above BANNER_FROM, every BANNER_EVERY_MS. After closing one it waits until the
-// weekly use has grown BANNER_AGAIN points, as Claude does not show it again sooner.
+// For Claude, the box is the rounded frame around the ProseMirror prompt editor (rightmost when
+// panes are side by side). The same process also closes Claude's "approaching your weekly limit"
+// banner above the input box when weekly use is above BANNER_FROM.
+//
+// For Antigravity, it locates the chat composer editor and its rounded wrapper, and inspects
+// nearby buttons/comboboxes for the selected model name (e.g. "Gemini 4 Neon (High)", "Claude Sonnet 4.6").
 
 const { spawn } = require('child_process')
 const log = require('./log')
@@ -22,6 +21,24 @@ const log = require('./log')
 const LIMIT_BANNER = /每周.{0,12}限额|weekly.{0,24}limit/i
 const isLimitBanner = text => LIMIT_BANNER.test(text)
 
+// Model selector button/label patterns near Antigravity's composer (no single quotes).
+const MODEL_LABEL = /\b(?:gemini|claude|gpt|sonnet|opus|haiku|o[134])(?:[\w.\-/+\s()]*[\w)])?/i
+
+function isModelLabel(text) {
+  if (typeof text !== 'string') return false
+  const clean = text.trim()
+  if (!clean || clean.length > 48 || /[\r\n,;!?\u3002\uff0c\uff01\uff1f\uff1b]/.test(clean)) return false
+  if (/https?:\/\/|[\\/]{2,}/.test(clean)) return false
+  return MODEL_LABEL.test(clean)
+}
+
+function extractModelLabel(text) {
+  if (!isModelLabel(text)) return null
+  const clean = text.trim()
+  const match = clean.match(MODEL_LABEL)
+  return match ? match[0].trim() : clean
+}
+
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -29,9 +46,17 @@ Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $AE = [System.Windows.Automation.AutomationElement]
 $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
 $editCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
+$docCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
+$modelCond = New-Object System.Windows.Automation.OrCondition(
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::ComboBox)),
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem)))
 $box = $null
 $boxHwnd = 0
+$boxHost = ''
 $searched = [DateTime]::MinValue
+$modelSearched = [DateTime]::MinValue
+$cachedModel = $null
 $closeCond = New-Object System.Windows.Automation.AndCondition(
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
   (New-Object System.Windows.Automation.OrCondition(
@@ -39,7 +64,7 @@ $closeCond = New-Object System.Windows.Automation.AndCondition(
     (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, 'Close')),
     (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, 'Dismiss')))))
 
-# Presses the close button of the weekly limit banner, and returns the banner's text, or $null
+# Presses the close button of Claude's weekly limit banner, and returns the banner's text, or $null
 function Close-Banner($hwnd) {
   $root = $AE::FromHandle([IntPtr]$hwnd)
   foreach ($b in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $closeCond)) {
@@ -59,7 +84,7 @@ function Close-Banner($hwnd) {
   return $null
 }
 
-function Find-Box($hwnd) {
+function Find-ClaudeBox($hwnd) {
   $root = $AE::FromHandle([IntPtr]$hwnd)
   $best = $null
   foreach ($e in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCond)) {
@@ -80,6 +105,96 @@ function Find-Box($hwnd) {
   return $best
 }
 
+function Find-AntigravityBox($hwnd) {
+  $root = $AE::FromHandle([IntPtr]$hwnd)
+  $rootRect = $root.Current.BoundingRectangle
+  if ($rootRect.IsEmpty -or $rootRect.Width -le 0) { return $null }
+  $best = $null
+  $bestScore = -1
+  $candidates = @()
+  foreach ($e in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCond)) { $candidates += $e }
+  if ($candidates.Count -eq 0) {
+    foreach ($d in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $docCond)) {
+      $cn = [string]$d.Current.ClassName
+      if ($cn -match 'ProseMirror|Lexical|tiptap|composer|prompt|chat') { $candidates += $d }
+    }
+  }
+  foreach ($e in $candidates) {
+    $c = $e.Current
+    $r = $c.BoundingRectangle
+    if ($c.IsOffscreen -or $r.IsEmpty -or $r.Width -lt 160 -or $r.Height -lt 16) { continue }
+    if ($r.Height -gt $rootRect.Height * 0.6) { continue }
+    $meta = ([string]$c.ClassName + ' ' + [string]$c.Name + ' ' + [string]$c.HelpText + ' ' + [string]$c.AutomationId)
+    $looksChat = $meta -match 'ProseMirror|Lexical|tiptap|composer|prompt|message|chat|ask|anything|询问|输入|消息|对话'
+    $inLowerHalf = $r.Top -ge ($rootRect.Top + $rootRect.Height * 0.38)
+    if (-not $looksChat -and -not $inLowerHalf) { continue }
+    $score = 0
+    if ($looksChat) { $score += 10000 }
+    if ($inLowerHalf) { $score += 2000 }
+    $score += [int]($r.Bottom - $rootRect.Top)
+    $score += [int]($r.Right - $rootRect.Left)
+    if ($score -gt $bestScore) {
+      $bestScore = $score
+      $best = $e
+    }
+  }
+  if (-not $best) { return $null }
+  $editHeight = $best.Current.BoundingRectangle.Height
+  $cur = $best
+  for ($i = 0; $i -lt 8; $i++) {
+    $cur = $walker.GetParent($cur)
+    if (-not $cur) { break }
+    $c = $cur.Current
+    $r = $c.BoundingRectangle
+    if ($r.IsEmpty -or $r.Width -gt $rootRect.Width * 0.94 -or $r.Height -gt $rootRect.Height * 0.65) { break }
+    if ($c.ClassName -match '(^|\s)rounded|composer|prompt|chat-input' -and $r.Height -ge $editHeight + 8) { return $cur }
+  }
+  return $best
+}
+
+function Match-ModelText($text) {
+  if (-not $text) { return $null }
+  $t = ([string]$text).Trim()
+  if ($t.Length -eq 0 -or $t.Length -gt 48 -or $t -match '[\r\n,;!?。，！？；]|https?://') { return $null }
+  if ($t -match '${MODEL_LABEL.source}') { return $matches[0].Trim() }
+  return $null
+}
+
+function Find-AntigravityModel($hwnd, $boxEl) {
+  $root = $AE::FromHandle([IntPtr]$hwnd)
+  $rootRect = $root.Current.BoundingRectangle
+  $scopes = @()
+  if ($boxEl) {
+    $scopes += $boxEl
+    $p1 = $walker.GetParent($boxEl)
+    if ($p1) {
+      $scopes += $p1
+      $p2 = $walker.GetParent($p1)
+      if ($p2) { $scopes += $p2 }
+    }
+  }
+  foreach ($scope in $scopes) {
+    foreach ($el in $scope.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelCond)) {
+      $c = $el.Current
+      if ($c.IsOffscreen) { continue }
+      $hit = Match-ModelText $c.Name
+      if (-not $hit) { $hit = Match-ModelText $c.HelpText }
+      if ($hit) { return $hit }
+    }
+  }
+  if (-not $rootRect.IsEmpty) {
+    $minTop = $rootRect.Top + $rootRect.Height * 0.55
+    foreach ($el in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelCond)) {
+      $c = $el.Current
+      $r = $c.BoundingRectangle
+      if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop) { continue }
+      $hit = Match-ModelText $c.Name
+      if ($hit) { return $hit }
+    }
+  }
+  return $null
+}
+
 while ($null -ne ($line = [Console]::In.ReadLine())) {
   $out = '{}'
   try {
@@ -87,8 +202,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     $hwnd = [Int64]$parts[0]
     $wantBox = $parts.Length -lt 2 -or $parts[1] -eq '1'
     $wantDismiss = $parts.Length -ge 3 -and $parts[2] -eq '1'
+    $hostType = if ($parts.Length -ge 4 -and $parts[3]) { $parts[3] } else { 'claude' }
+    $wantModel = $parts.Length -ge 5 -and $parts[4] -eq '1'
     $fields = @()
-    if ($wantDismiss) {
+    if ($wantDismiss -and $hostType -eq 'claude') {
       $closed = Close-Banner $hwnd
       if ($closed) {
         $fields += '"dismissed":' + (ConvertTo-Json ([string]$closed) -Compress)
@@ -97,10 +214,11 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     }
     if ($wantBox) {
       $age = ([DateTime]::UtcNow - $searched).TotalSeconds
-      if ($hwnd -ne $boxHwnd -or ((-not $box) -and $age -gt 1) -or $age -gt 5) {
+      if ($hwnd -ne $boxHwnd -or $hostType -ne $boxHost -or ((-not $box) -and $age -gt 1) -or $age -gt 5) {
         $searched = [DateTime]::UtcNow
         $boxHwnd = $hwnd
-        $box = Find-Box $hwnd
+        $boxHost = $hostType
+        $box = if ($hostType -eq 'antigravity') { Find-AntigravityBox $hwnd } else { Find-ClaudeBox $hwnd }
       }
       if ($box) {
         $c = $box.Current
@@ -109,9 +227,20 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         else { $fields += '"x":' + [int]$r.X + ',"y":' + [int]$r.Y + ',"w":' + [int]$r.Width + ',"h":' + [int]$r.Height }
       }
     }
+    if ($wantModel -and $hostType -eq 'antigravity') {
+      $mAge = ([DateTime]::UtcNow - $modelSearched).TotalSeconds
+      if ($hwnd -ne $boxHwnd -or $mAge -ge 1) {
+        $modelSearched = [DateTime]::UtcNow
+        $cachedModel = Find-AntigravityModel $hwnd $box
+      }
+      if ($cachedModel) {
+        $fields += '"model":' + (ConvertTo-Json ([string]$cachedModel) -Compress)
+      }
+    }
     $out = '{' + ($fields -join ',') + '}'
   } catch {
     $box = $null
+    $cachedModel = $null
     $out = '{"error":' + (ConvertTo-Json ([string]$_.Exception.Message) -Compress) + '}'
   }
   [Console]::Out.WriteLine($out)
@@ -120,6 +249,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 `
 
 const POLL_MS = 200 // how often to ask while the character follows the box
+const MODEL_ONLY_POLL_MS = 1000 // how often to check model label when snapToBox is off
 const STALL_MS = 5000 // an unanswered question this old means the reader is stuck
 const RESTART_MS = 10 * 1000
 const BANNER_FROM = 70 // weekly percent; a little under Claude's 75%, as the widget's figure can lag
@@ -141,8 +271,8 @@ function bannerDue({ weeklyPercent, checkedAt, dismissed, now }) {
 }
 
 let child = null
-let asked = null // { hwnd, at } while a question is out
-let latest = null // { hwnd, rect, at }
+let asked = null // { hwnd, host, at } while a question is out
+let latest = null // { hwnd, host, rect, model, at }
 let lastStart = 0
 let lastError = null
 let bannerCheckedAt = null
@@ -184,7 +314,7 @@ function start() {
 
 function answer(line) {
   if (!line || !asked) return
-  const { hwnd } = asked
+  const { hwnd, host } = asked
   asked = null
   let value = {}
   try {
@@ -201,12 +331,13 @@ function answer(line) {
   const rect = Number.isFinite(value.x) && value.w > 0 && value.h > 0
     ? { left: value.x, top: value.y, right: value.x + value.w, bottom: value.y + value.h }
     : null
-  latest = { hwnd, rect, at: Date.now() }
+  const model = typeof value.model === 'string' && value.model.trim() ? extractModelLabel(value.model) : null
+  latest = { hwnd, host, rect, model, at: Date.now() }
 }
 
-// Asks for the box of the window `hwnd` (with box) at most every POLL_MS, and, with dismiss, closes its
-// weekly limit banner when bannerDue says so
-function poll(hwnd, { box = true, dismiss = false, weeklyPercent = null } = {}) {
+// Asks for the box of the window `hwnd` (with box) at most every POLL_MS, closes Claude's weekly
+// limit banner when bannerDue says so, and reads Antigravity's model label when detectModel is true.
+function poll(hwnd, { host = 'claude', box = true, dismiss = false, weeklyPercent = null, detectModel = false } = {}) {
   const now = Date.now()
   if (asked) {
     if (now - asked.at < STALL_MS) return
@@ -214,13 +345,17 @@ function poll(hwnd, { box = true, dismiss = false, weeklyPercent = null } = {}) 
     stop()
   }
   lastWeekly = weeklyPercent
-  const closeBanner = dismiss && bannerDue({ weeklyPercent, checkedAt: bannerCheckedAt, dismissed: bannerDismissed, now })
-  if (!closeBanner && (!box || (latest && latest.hwnd === hwnd && now - latest.at < POLL_MS))) return
+  const closeBanner =
+    host === 'claude' && dismiss && bannerDue({ weeklyPercent, checkedAt: bannerCheckedAt, dismissed: bannerDismissed, now })
+  const wantModel = host === 'antigravity' && detectModel
+  const cadence = box ? POLL_MS : MODEL_ONLY_POLL_MS
+  if (!closeBanner && !box && !wantModel) return
+  if (!closeBanner && latest && latest.hwnd === hwnd && latest.host === host && now - latest.at < cadence) return
   if (!child) start()
   if (!child) return
-  asked = { hwnd, at: now }
+  asked = { hwnd, host, at: now }
   if (closeBanner) bannerCheckedAt = now
-  child.stdin.write(`${hwnd} ${box ? 1 : 0} ${closeBanner ? 1 : 0}\n`)
+  child.stdin.write(`${hwnd} ${box ? 1 : 0} ${closeBanner ? 1 : 0} ${host} ${wantModel ? 1 : 0}\n`)
 }
 
 // The box's last known rectangle (physical pixels: left, top, right, bottom), or null. It may be from
@@ -230,6 +365,12 @@ function boxOf(hwnd) {
   return latest.rect
 }
 
+// The model label read near Antigravity's composer for `hwnd`, or null.
+function modelOf(hwnd) {
+  if (!latest || latest.hwnd !== hwnd || latest.host !== 'antigravity') return null
+  return latest.model
+}
+
 function stop() {
   if (child) child.kill()
   child = null
@@ -237,4 +378,4 @@ function stop() {
   latest = null
 }
 
-module.exports = { poll, boxOf, stop, isLimitBanner, bannerDue }
+module.exports = { poll, boxOf, modelOf, stop, isLimitBanner, isModelLabel, extractModelLabel, bannerDue }

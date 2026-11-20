@@ -6,6 +6,11 @@
   --track: rgba(31, 42, 68, 0.1);
   --five-hour: #4c7cf0;
   --seven-day: #9b6bf2;
+  --gemini: #2f80ed;
+  --flash: #0ea5a4;
+  --claude: #9b6bf2;
+  --gpt: #10a37f;
+  --other: #6b7591;
   --warn: #e39a1c;
   --bad: #e0483e;
   --pet: 108px;
@@ -67,7 +72,7 @@ html, body {
   100% { transform: scale(1, 1); }
 }
 
-/* Both windows at a glance, under the character. */
+/* Current window(s) at a glance, under the character. */
 #badges {
   position: absolute;
   left: 50%;
@@ -92,6 +97,11 @@ html, body {
 }
 
 .pill[data-kind="seven_day"] { background: var(--seven-day); }
+.pill[data-color="gemini"] { background: var(--gemini); }
+.pill[data-color="flash"] { background: var(--flash); }
+.pill[data-color="claude"] { background: var(--claude); }
+.pill[data-color="gpt"] { background: var(--gpt); }
+.pill[data-color="other"] { background: var(--other); }
 .pill.warn { background: var(--warn); }
 .pill.bad { background: var(--bad); }
 .pill.hidden { display: none; }
@@ -101,8 +111,11 @@ html, body {
   position: absolute;
   right: 10px;
   bottom: calc(var(--pet) + 22px);
-  width: 260px;
-  padding: 12px 14px 10px;
+  width: 268px;
+  max-height: 166px;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 9px;
   border-radius: 14px;
   background: var(--card);
   box-shadow: 0 8px 24px rgba(20, 30, 60, 0.25);
@@ -128,27 +141,108 @@ html, body {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
+  flex-shrink: 0;
+}
+
+#rows {
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+#rows::-webkit-scrollbar { width: 4px; }
+#rows::-webkit-scrollbar-thumb { background: rgba(31, 42, 68, 0.18); border-radius: 99px; }
+
+.model-bar {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(31, 42, 68, 0.05);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
 }
 
 .title { font-weight: 700; font-size: 14px; }
 .muted { color: var(--muted); font-size: 12px; }
 .hidden { display: none; }
-#bubble.hidden { display: block; }
+#bubble.hidden { display: flex; }
 
-.row { margin: 8px 0 10px; }
+.row { margin: 6px 0 8px; }
 .row-top { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
-.row-top b { font-size: 17px; font-variant-numeric: tabular-nums; }
-.bar { height: 7px; margin: 5px 0 3px; border-radius: 99px; background: var(--track); overflow: hidden; }
+.row-top b { font-size: 16px; font-variant-numeric: tabular-nums; }
+.bar { height: 6px; margin: 4px 0 2px; border-radius: 99px; background: var(--track); overflow: hidden; }
 .bar i { display: block; height: 100%; width: 0; border-radius: 99px; background: var(--five-hour); transition: width 600ms ease, background 300ms; }
 .row[data-kind="seven_day"] .bar i { background: var(--seven-day); }
+.row[data-color="gemini"] .bar i { background: var(--gemini); }
+.row[data-color="flash"] .bar i { background: var(--flash); }
+.row[data-color="claude"] .bar i { background: var(--claude); }
+.row[data-color="gpt"] .bar i { background: var(--gpt); }
+.row[data-color="other"] .bar i { background: var(--other); }
+
 .row .name::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--five-hour); vertical-align: 1px; }
 .row[data-kind="seven_day"] .name::before { background: var(--seven-day); }
+.row[data-color="gemini"] .name::before { background: var(--gemini); }
+.row[data-color="flash"] .name::before { background: var(--flash); }
+.row[data-color="claude"] .name::before { background: var(--claude); }
+.row[data-color="gpt"] .name::before { background: var(--gpt); }
+.row[data-color="other"] .name::before { background: var(--other); }
+
 .row .bar i.warn { background: var(--warn); }
 .row .bar i.bad { background: var(--bad); }
+
+/* Grouped quota cards for Antigravity */
+.group {
+  margin: 4px 0 6px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  border-left: 3px solid transparent;
+  background: rgba(31, 42, 68, 0.03);
+}
+.group.active {
+  background: rgba(47, 128, 237, 0.07);
+  border-left-color: var(--gemini);
+}
+.group.active[data-color="flash"] { border-left-color: var(--flash); background: rgba(14, 165, 164, 0.08); }
+.group.active[data-color="claude"] { border-left-color: var(--claude); background: rgba(155, 107, 242, 0.08); }
+.group.active[data-color="gpt"] { border-left-color: var(--gpt); background: rgba(16, 163, 127, 0.08); }
+
+.group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+.group-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(31, 42, 68, 0.09);
+  color: var(--muted);
+}
+.group.active .group-tag {
+  background: var(--gemini);
+  color: #fff;
+}
+.group.active[data-color="flash"] .group-tag { background: var(--flash); }
+.group.active[data-color="claude"] .group-tag { background: var(--claude); }
+.group.active[data-color="gpt"] .group-tag { background: var(--gpt); }
+
+.group .row { margin: 3px 0 2px; }
+.group .row-top { font-size: 12px; }
+.group .row-top b { font-size: 14px; }
+.group .muted.reset { font-size: 11px; }
+
 #empty { margin: 4px 0 2px; line-height: 1.5; }
 
-/* A short reminder in the bubble's place: Claude is waiting, or how much a turn used. */
+/* A short reminder in the bubble's place: waiting for user, or how much a turn used. */
 #note {
   position: absolute;
   right: 10px;
@@ -195,3 +289,7 @@ html, body {
 }
 
 .delta[data-kind="seven_day"] { background: var(--seven-day); }
+.delta[data-color="gemini"] { background: var(--gemini); }
+.delta[data-color="flash"] { background: var(--flash); }
+.delta[data-color="claude"] { background: var(--claude); }
+.delta[data-color="gpt"] { background: var(--gpt); }

@@ -15,9 +15,13 @@
 
 ## 中文
 
-贴在 Claude 桌面 App 旁边的小桌宠，实时显示 Claude 订阅额度：**蓝色**是 5 小时窗口已用百分比，**紫色**是本周窗口已用百分比。用到 70% 变橙、90% 变红，跨过 80% 和 95% 时自动弹气泡提醒。点一下形象可以看进度条和重置倒计时。
+贴在 Claude 和 Antigravity（反重力）桌面 App 旁边的小桌宠，实时显示订阅额度：
+- **Claude 模式**：**蓝色**是 5 小时窗口已用百分比，**紫色**是本周窗口已用百分比。
+- **Antigravity 模式**：根据当前选择的模型（Gemini Pro / Gemini Flash / Claude / GPT 等）自动切换对应分组额度，点击气泡可同时查看所有分组并可手动固定分组。
 
-> 个人做的非官方小工具，和 Anthropic 没有关系。
+统一以「已用 %」展示，用到 70% 变橙、90% 变红，跨过 80% 和 95% 时自动弹气泡提醒。点一下形象可以看进度条和重置倒计时。
+
+> 个人做的非官方小工具，和 Anthropic / Google 没有关系。
 
 ### 安装
 
@@ -79,7 +83,36 @@ git config --global http.https://github.com.proxy http://127.0.0.1:7890
 ### 工作原理
 
 - `plugin/`：`whale-usage-bridge` 插件。Claude Code 每次回复后都会报告当前额度，插件把它写进 `~/.claude/whale/usage.json`；每个会话是否在等你、上一轮让额度涨了多少，写进 `~/.claude/whale/sessions/<会话 id>.json`。用的是官方插件接口，不读取任何登录凭证，也不记录对话内容。
-- `src/`：Electron 桌面程序。读取这个文件并显示；通过 Win32 接口找到 Claude 窗口并跟随它，Claude 不在前台或最小化时自动隐藏。
+- `antigravity-plugin/`：Antigravity 官方原生插件（`plugin.json` + `hooks.json`），将目录复制到 `~/.gemini/config/plugins/whale-usage-antigravity/` 后即可启用，负责把当前模型名写入 `~/.gemini/antigravity/whale/state.json`，把等待提问和每轮结束写入 `~/.gemini/antigravity/whale/sessions/<会话 id>.json`。
+- `src/`：Electron 桌面程序。自动跟随前台的 Claude 或 Antigravity 2.0 桌面窗口（右键菜单「跟随」可切换自动 / 仅 Claude / 仅反重力），贴在输入框右上角并在 Antigravity 下自动识别当前选择的模型。
+
+#### 在 Antigravity（反重力）中使用
+
+1. **自动跟随与切换**：直接运行 Whale Usage，默认「跟随：自动」——Claude 在前台就贴 Claude 并显示 Claude 额度，Antigravity 2.0 在前台就自动切到 Antigravity 窗口、独立位置锚点和 Antigravity 分组额度。
+2. **接入实时额度**（二选一，也可并用）：
+   - **外部额度命令（默认）**：安装开源 CLI `npm i -g antigravity-usage`，Whale Usage 会定时执行 `antigravity-usage quota --json`（并在每轮结束后立即刷新），自动把各模型池的剩余比例换算为「已用 %」并按当前模型切换显示。命令和刷新间隔可在 `%APPDATA%\Whale Usage\settings.json` 里修改 `antigravityQuotaCommand` / `antigravityQuotaIntervalSec`。
+   - **标准本地 JSON 协议**：也可以由你自己的脚本直接写入 `~/.gemini/antigravity/whale/usage.json`：
+
+     ```json
+     {
+       "updatedAt": 1760000000000,
+       "activeModel": "Gemini 4 Neon (High)",
+       "groups": [
+         {
+           "id": "gemini_pro",
+           "label": "Gemini Pro",
+           "limits": [{ "kind": "five_hour", "percentUsed": 25, "resetsAt": "2026-11-21T05:00:00.000Z" }]
+         },
+         {
+           "id": "claude",
+           "label": "Claude",
+           "limits": [{ "kind": "five_hour", "percentUsed": 60, "resetsAt": "2026-11-21T04:00:00.000Z" }]
+         }
+       ]
+     }
+     ```
+3. **安装 Antigravity 插件（可选，用于模型兜底 + 等我回答/每轮结束提醒）**：把仓库里的 `antigravity-plugin/` 文件夹复制到 `~/.gemini/config/plugins/whale-usage-antigravity/`（或在工作区 `.agents/plugins/` 下）即可。
+
 - 运行日志在 `%APPDATA%\Whale Usage\logs\main.log`，托盘菜单「打开日志文件夹」可以直接打开。出问题时请附上这个文件。
 
 ### 从源码运行
@@ -106,9 +139,9 @@ npm start
 
 ## English
 
-A desktop pet that sits next to the Claude desktop app and shows your Claude subscription usage: the **blue** number is the 5-hour window, the **purple** one the weekly window. They turn orange at 70% and red at 90%, and a bubble pops up when one passes 80% or 95%. Click the character for progress bars and reset times.
+A desktop pet that sits next to the Claude and Antigravity desktop apps and shows your subscription usage as percent used: for **Claude**, the **blue** number is the 5-hour window and the **purple** one the weekly window; for **Antigravity**, it automatically switches to the quota group matching your selected model (Gemini Pro / Flash / Claude / GPT). Numbers turn orange at 70% and red at 90%, and a bubble pops up at 80% or 95%. Click the character for progress bars and reset times.
 
-> An unofficial personal tool, not affiliated with Anthropic.
+> An unofficial personal tool, not affiliated with Anthropic or Google.
 
 ### Install
 
@@ -145,7 +178,8 @@ Both need plugin 0.2.0 or later; if you installed the plugin before, update `wha
 ### How it works
 
 - `plugin/`: after each Claude Code response, the plugin writes the reported rate-limit usage to `~/.claude/whale/usage.json`, and whether each session is waiting for you and how much its last turn used to `~/.claude/whale/sessions/<session id>.json`, through the official plugin API, without reading any credentials or recording the conversation.
-- `src/`: the Electron app shows that file, finds the Claude window through Win32 and follows it, and hides while Claude is in the background or minimized.
+- `antigravity-plugin/`: native Antigravity lifecycle hooks plugin (`plugin.json` + `hooks.json`). Copy it to `~/.gemini/config/plugins/whale-usage-antigravity/` to sync the active `modelName`, waiting prompts (`ask_question`), and finished turns into `~/.gemini/antigravity/whale/`. For live quotas, install `npm i -g antigravity-usage` (polled via `antigravity-usage quota --json`, configurable via `antigravityQuotaCommand`) or write standard multi-group JSON to `~/.gemini/antigravity/whale/usage.json`.
+- `src/`: the Electron app follows whichever of Claude or Antigravity 2.0 is in front (or lock to one in the menu), sits on the input box, reads Antigravity's active model label, and switches quota groups accordingly.
 - The run log is at `%APPDATA%\Whale Usage\logs\main.log` (menu: 打开日志文件夹). Attach it when reporting a problem.
 - Right-click the character or the tray icon for the menu, styled like the Windows tray menu of [Claude Auto Pass](https://github.com/tiger-git2022/claude-auto-pass): Windows 11 acrylic, rounded corners, Fluent icons, light or dark with Windows.
 

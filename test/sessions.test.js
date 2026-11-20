@@ -51,3 +51,21 @@ test('an old turn found later is not announced', () => {
   const late = track(tracker, [{ id: 'b', updatedAt: NOW, turn: { id: 't1', at: NOW - 5 * 60 * 1000, deltas: { five_hour: 4 } } }], NOW)
   assert.deepStrictEqual(late.newTurns, [])
 })
+
+test('tracks Claude and Antigravity sessions side by side and reports zero-delta completedTurns', () => {
+  const tracker = createTracker()
+  track(tracker, [], NOW)
+  const res = track(
+    tracker,
+    [
+      { id: 's1', host: 'claude', updatedAt: NOW, wait: { kind: 'approval', tool: 'Bash', since: NOW } },
+      { id: 's1', host: 'antigravity', updatedAt: NOW, turn: { id: 'ag-1', at: NOW, deltas: {} } },
+    ],
+    NOW + 1,
+  )
+  assert.strictEqual(res.newWaits.length, 1)
+  assert.strictEqual(res.newWaits[0].host, 'claude')
+  assert.strictEqual(res.newTurns.length, 0)
+  assert.strictEqual(res.completedTurns.length, 1)
+  assert.strictEqual(res.completedTurns[0].host, 'antigravity')
+})

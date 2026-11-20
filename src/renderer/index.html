@@ -10,21 +10,19 @@
   <div id="stage">
     <section id="bubble" class="hidden" aria-live="polite">
       <header>
-        <span class="title">Claude 额度</span>
+        <span id="bubble-title" class="title">Claude 额度</span>
         <span id="updated" class="muted"></span>
       </header>
+      <div id="model-bar" class="model-bar hidden"></div>
       <div id="rows"></div>
       <p id="empty" class="muted hidden">还没有数据。在 Claude 的 Code 标签页里发一条消息，额度就会出现在这里。</p>
     </section>
 
     <section id="note" class="hidden" aria-live="assertive"></section>
 
-    <div id="pet"title="点我看额度，按住拖动，右键打开菜单">
+    <div id="pet" title="点我看额度，按住拖动，右键打开菜单">
       <img id="avatar" alt="" draggable="false">
-      <div id="badges">
-        <span class="pill hidden" data-kind="five_hour"></span>
-        <span class="pill hidden" data-kind="seven_day"></span>
-      </div>
+      <div id="badges"></div>
     </div>
   </div>
   <script src="app.js"></script>

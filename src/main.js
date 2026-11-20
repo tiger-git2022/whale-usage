@@ -8,9 +8,10 @@ const menu = require('./menu')
 const sessions = require('./sessions')
 const updater = require('./updater')
 const webusage = require('./webusage')
+const antigravity = require('./antigravity')
 const composer = require('./composer')
 const limits = require('./limits')
-const { claudeState } = require('./win32')
+const { targetState } = require('./win32')
 
 // The widget window at 100% size: the character sits at its bottom-right, the bubble above it.
 // The page is zoomed by settings.scale, so these all scale together.
@@ -23,28 +24,45 @@ const SIZES = [
   { label: '大', scale: 0.9 },
   { label: '特大', scale: 1.1 },
 ]
+const TARGETS = [
+  { id: 'auto', label: '自动' },
+  { id: 'claude', label: 'Claude' },
+  { id: 'antigravity', label: '反重力' },
+]
 const TICK_MS = 80
 const UPDATE_FIRST_CHECK_MS = 15 * 1000
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
 const SNAP_DIP = 28
 
-const DEFAULTS = {
-  // Where the character's bottom-right corner sits, measured from Claude's bottom-right corner.
-  // The default peeks in from Claude's right edge, just above the input box. The art is cropped
-  // on its right side, so that edge sits flush with the window (the screen edge when maximized).
+const DEFAULT_HOST_ANCHOR = () => ({
+  // Where the character's bottom-right corner sits, measured from the host window's bottom-right corner.
   anchor: { dx: 0, dy: -100 },
-  // With snapToBox, the same corner measured from the input box's top-right corner instead
+  // With snapToBox, the same corner measured from the input box's top-right corner instead.
+  boxAnchor: { dx: 0, dy: 2 },
+})
+
+const DEFAULTS = {
+  target: 'auto', // 'auto' | 'claude' | 'antigravity'
+  anchor: { dx: 0, dy: -100 },
   snapToBox: true,
   boxAnchor: { dx: 0, dy: 2 },
+  hostAnchors: {
+    claude: DEFAULT_HOST_ANCHOR(),
+    antigravity: DEFAULT_HOST_ANCHOR(),
+  },
   closeLimitBanner: true, // press the close button of Claude's "approaching your weekly limit" banner
   scale: 0.7,
-  showWhen: 'front', // 'front': only while Claude is the active window; 'open': whenever Claude is not minimized
+  showWhen: 'front', // 'front': only while the target app is active; 'open': whenever it is not minimized
   sound: true,
   notifyWait: true, // bubble and sound when a session waits for an answer or an approval
   notifyTurn: true, // bubble and sound when a turn ends having used at least 1% of a window
   skin: 'peek', // one of SKINS, or 'custom' for customSkin
   customSkin: null, // a picture the person chose, copied into the app's data folder
   autoUpdate: true, // look for a new release at start and every few hours, and install it right away
+  antigravityQuotaEnabled: true,
+  antigravityQuotaCommand: antigravity.DEFAULT_COMMAND,
+  antigravityQuotaIntervalSec: antigravity.DEFAULT_INTERVAL_SEC,
+  antigravityGroupOverride: 'auto', // 'auto' follows active model, or a specific group id
 }
 
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json')
@@ -53,6 +71,7 @@ const usagePath = () =>
     ? path.join(process.env.CLAUDE_CONFIG_DIR, 'whale', 'usage.json')
     : path.join(os.homedir(), '.claude', 'whale', 'usage.json')
 const sessionsDir = () => path.join(path.dirname(usagePath()), 'sessions')
+
 // The bundled characters, each skins/<id>/character.png: square, transparent, cropped at the right
 // and bottom edges so it peeks in from the corner.
 const SKINS = [
@@ -64,37 +83,72 @@ const bundledSkin = id => path.join(__dirname, '..', 'skins', id, 'character.png
 let settings = { ...DEFAULTS }
 let win = null
 let tray = null
-let cachedClaude = null
+let cachedTarget = null
+let activeHost = 'claude' // 'claude' | 'antigravity'
 let dragging = null
 let lastBounds = null
 let isShown = false
-let lastClaudeRect = null
+let lastHostRect = null
 let lastBoxRect = null // the input box the character sat on at the last tick (DIP), or null
-let claudeSeen = null // for logging when Claude's window appears or goes
+let targetSeen = null // `${host}:${hwnd}` for logging when the followed window appears or changes
 let pendingUpdate = null // the newer release found by the last check
 let updateProgress = null // text while an update downloads
-let weeklyPercent = null // the highest weekly window's use, from the last usage read, or null
+let weeklyPercent = null // Claude's highest weekly window's use, from the last usage read, or null
+let lastUiModel = null // latest model name read from Antigravity via UI Automation
+let lastAntigravityPayload = null // latest renderer payload for Antigravity (for menu chips)
+
+function cloneDefaults() {
+  return {
+    ...DEFAULTS,
+    anchor: { ...DEFAULTS.anchor },
+    boxAnchor: { ...DEFAULTS.boxAnchor },
+    hostAnchors: {
+      claude: DEFAULT_HOST_ANCHOR(),
+      antigravity: DEFAULT_HOST_ANCHOR(),
+    },
+  }
+}
 
 function loadSettings() {
+  const base = cloneDefaults()
   try {
     // Notepad and PowerShell may save the file with a byte order mark
-    const text = fs.readFileSync(settingsPath(), 'utf8').replace(/^﻿/, '')
-    settings = { ...DEFAULTS, ...JSON.parse(text) }
+    const text = fs.readFileSync(settingsPath(), 'utf8').replace(/^\uFEFF/, '')
+    const parsed = JSON.parse(text)
+    settings = { ...base, ...parsed }
+    const savedHosts = parsed.hostAnchors || {}
+    settings.hostAnchors = {
+      claude: {
+        anchor: savedHosts.claude?.anchor || parsed.anchor || { ...DEFAULTS.anchor },
+        boxAnchor: savedHosts.claude?.boxAnchor || parsed.boxAnchor || { ...DEFAULTS.boxAnchor },
+      },
+      antigravity: {
+        anchor: savedHosts.antigravity?.anchor || { ...DEFAULTS.anchor },
+        boxAnchor: savedHosts.antigravity?.boxAnchor || { ...DEFAULTS.boxAnchor },
+      },
+    }
   } catch (err) {
     if (err.code !== 'ENOENT') log.warn('settings unreadable, using defaults:', err.message)
-    settings = { ...DEFAULTS }
+    settings = base
   }
+  if (!TARGETS.some(t => t.id === settings.target)) settings.target = DEFAULTS.target
   // Before there were several characters, skin held the custom picture's path, or null
   if (settings.skin === null) settings.skin = DEFAULTS.skin
   if (settings.skin !== 'custom' && !SKINS.some(s => s.id === settings.skin)) {
     settings.customSkin = settings.skin
     settings.skin = 'custom'
   }
+  activeHost = settings.target === 'antigravity' ? 'antigravity' : 'claude'
 }
 
 function saveSettings() {
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true })
   fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2))
+}
+
+function anchorOf(host = activeHost) {
+  settings.hostAnchors[host] ??= DEFAULT_HOST_ANCHOR()
+  return settings.hostAnchors[host]
 }
 
 function skinPath() {
@@ -116,11 +170,12 @@ function toDip(rect) {
   })
 }
 
-// Window position for a given Claude rectangle (DIP) and the saved anchor; on the input box when it is known.
-function boundsFor(claude, box) {
+// Window position for a given host rectangle (DIP) and the saved anchor; on the input box when it is known.
+function boundsFor(hostRect, box, host = activeHost) {
   const d = dims()
-  const petRight = box ? box.x + box.width + settings.boxAnchor.dx : claude.x + claude.width + settings.anchor.dx
-  const petBottom = box ? box.y + settings.boxAnchor.dy : claude.y + claude.height + settings.anchor.dy
+  const pos = anchorOf(host)
+  const petRight = box ? box.x + box.width + pos.boxAnchor.dx : hostRect.x + hostRect.width + pos.anchor.dx
+  const petBottom = box ? box.y + pos.boxAnchor.dy : hostRect.y + hostRect.height + pos.anchor.dy
   return {
     x: Math.round(petRight + d.inset - d.w),
     y: Math.round(petBottom + d.inset - d.h),
@@ -136,49 +191,82 @@ function setShown(show) {
   else win.hide()
 }
 
+function setActiveHost(nextHost) {
+  if (!nextHost || nextHost === activeHost) return
+  activeHost = nextHost
+  lastBounds = null
+  lastBoxRect = null
+  log.info('switched host to', activeHost)
+  rebuildTray()
+  sendUsage()
+}
+
 function tick() {
   if (!win || win.isDestroyed()) return
   let state
   try {
-    state = claudeState(cachedClaude, process.pid)
+    state = targetState(cachedTarget, process.pid, settings.target)
   } catch (err) {
-    log.error('claude window lookup failed', err)
+    log.error('host window lookup failed', err)
     return
   }
-  cachedClaude = state.window
-  const seen = state.window ? state.window.hwnd : 0
-  if (seen !== claudeSeen) {
-    log.info(seen ? `following Claude window ${seen} (pid ${state.window.pid})` : 'no Claude window')
-    claudeSeen = seen
+  cachedTarget = state.window
+  const seen = state.window ? `${state.window.host}:${state.window.hwnd}` : ''
+  if (seen !== targetSeen) {
+    log.info(seen ? `following ${state.window.host} window ${state.window.hwnd} (pid ${state.window.pid})` : 'no host window')
+    targetSeen = seen
   }
   if (!state.window || state.minimized) return setShown(false)
 
-  const claude = toDip(state.rect)
-  const inFront = state.claudeInFront || state.selfInFront || dragging
+  const host = state.window.host
+  if (host !== activeHost) setActiveHost(host)
+
+  const hostRect = toDip(state.rect)
+  const inFront = state.hostInFront || state.selfInFront || dragging
   const show = settings.showWhen === 'open' || process.env.WHALE_FORCE_SHOW === '1' ? true : Boolean(inFront)
-  // Only asked while the character shows, so a Claude window in the background is left alone
-  if ((settings.snapToBox || settings.closeLimitBanner) && show) {
-    composer.poll(state.window.hwnd, { box: settings.snapToBox, dismiss: settings.closeLimitBanner, weeklyPercent })
+
+  // Only inspect UIA while the character shows, so a background window is left alone
+  const wantBox = settings.snapToBox
+  const wantDismiss = host === 'claude' && settings.closeLimitBanner
+  const wantModel = host === 'antigravity'
+  if ((wantBox || wantDismiss || wantModel) && show) {
+    composer.poll(state.window.hwnd, {
+      host,
+      box: wantBox,
+      dismiss: wantDismiss,
+      weeklyPercent,
+      detectModel: wantModel,
+    })
   }
+
+  if (host === 'antigravity' && show) {
+    const uiModel = composer.modelOf(state.window.hwnd)
+    if (uiModel && uiModel !== lastUiModel) {
+      log.info('antigravity ui model:', uiModel)
+      lastUiModel = uiModel
+      sendUsage()
+    }
+  }
+
   const boxRect = settings.snapToBox ? composer.boxOf(state.window.hwnd) : null
   const box = boxRect ? toDip(boxRect) : null
   if (Boolean(box) !== Boolean(lastBoxRect)) log.info(box ? `on the input box ${JSON.stringify(box)}` : 'no input box, by the window corner')
   if (!dragging) {
-    const b = boundsFor(claude, box)
+    const b = boundsFor(hostRect, box, host)
     if (!lastBounds || b.x !== lastBounds.x || b.y !== lastBounds.y || b.width !== lastBounds.width) {
       win.setBounds(b)
       lastBounds = b
     }
   }
-  lastClaudeRect = claude
+  lastHostRect = hostRect
   if (!dragging) lastBoxRect = box
 
   setShown(show)
 }
 
-// Snaps the character flush to Claude's left or right edge when dropped close to it.
+// Snaps the character flush to the host's left or right edge when dropped close to it.
 function anchorFromDrop(bounds) {
-  const c = lastClaudeRect
+  const c = lastHostRect
   const d = dims()
   let petRight = bounds.x + d.w - d.inset
   const petBottom = bounds.y + d.h - d.inset
@@ -198,9 +286,7 @@ function anchorFromDrop(bounds) {
 
 let lastUsageText = null
 
-// The plugin's file merged with what claude.ai answered, when signed in there
-function sendUsage() {
-  if (!win || win.isDestroyed()) return
+function readClaudeUsage() {
   let file = null
   try {
     file = JSON.parse(fs.readFileSync(usagePath(), 'utf8'))
@@ -208,12 +294,42 @@ function sendUsage() {
     if (err.code !== 'ENOENT') log.warn('could not read usage file', err.message)
   }
   const usage = limits.merge(file, webusage.latest())
-  const text = (usage?.limits || []).map(l => `${l.kind} ${Math.round(l.percentUsed)}%`).join(', ')
-  if (text !== lastUsageText) log.info('usage', text)
-  lastUsageText = text
   const weekly = (usage?.limits || []).filter(l => String(l.kind).startsWith('seven_day')).map(l => l.percentUsed)
   weeklyPercent = weekly.length ? Math.max(...weekly) : null
-  win.webContents.send('usage', usage)
+  return usage ? { ...usage, host: 'claude', hostLabel: 'Claude' } : { host: 'claude', hostLabel: 'Claude', limits: [] }
+}
+
+function readAntigravityUsage() {
+  const fileUsage = antigravity.readUsageFile()
+  const merged = antigravity.mergeUsage(fileUsage, antigravity.latest())
+  const hookState = antigravity.readState()
+  const activeModel = lastUiModel || hookState?.modelName || merged?.activeModel || null
+  const pollerState = antigravity.state()
+  const payload = antigravity.buildRendererPayload({
+    usage: merged,
+    activeModel,
+    overrideGroup: settings.antigravityGroupOverride || 'auto',
+    quotaStatus: pollerState.status,
+    quotaError: pollerState.error,
+  })
+  lastAntigravityPayload = payload
+  return payload
+}
+
+// Sends the current active host's usage to the renderer.
+function sendUsage() {
+  if (!win || win.isDestroyed()) return
+  const payload = activeHost === 'antigravity' ? readAntigravityUsage() : readClaudeUsage()
+  const summary =
+    payload.host === 'antigravity'
+      ? `antigravity[${payload.activeModel || 'auto'} -> ${payload.activeGroup || '-'}] ` +
+        (payload.groups || [])
+          .map(g => `${g.id}:${g.limits.map(l => `${Math.round(l.percentUsed)}%`).join('/')}`)
+          .join(', ')
+      : `claude ` + (payload.limits || []).map(l => `${l.kind} ${Math.round(l.percentUsed)}%`).join(', ')
+  if (summary !== lastUsageText) log.info('usage', summary)
+  lastUsageText = summary
+  win.webContents.send('usage', payload)
 }
 
 function webUsageEntry() {
@@ -222,6 +338,40 @@ function webUsageEntry() {
   // Usually claude.ai's security check has expired; its page in the window renews it and closes
   if (state === 'error') return { type: 'item', id: 'web:login', icon: 'E774', text: 'claude.ai 额度暂时读不到，点此重新打开…' }
   return { type: 'item', id: 'web:login', icon: 'E774', text: '登录 claude.ai，读取全部额度…' }
+}
+
+function antigravityQuotaEntry() {
+  const st = antigravity.state()
+  if (!settings.antigravityQuotaEnabled || !settings.antigravityQuotaCommand) {
+    return { type: 'item', id: 'ag:toggle', icon: 'E72C', text: '启用反重力外部额度命令', checked: false }
+  }
+  if (st.status === 'missing-cli') {
+    return { type: 'item', id: 'ag:help', icon: 'E946', text: '反重力额度：未检测到 CLI（点此查看说明）' }
+  }
+  if (st.status === 'error') {
+    return { type: 'item', id: 'ag:refresh', icon: 'E72C', text: '反重力额度刷新失败，点此重试' }
+  }
+  return { type: 'item', id: 'ag:refresh', icon: 'E72C', text: '立即刷新反重力额度' }
+}
+
+async function showAntigravityHelp() {
+  const cmd = settings.antigravityQuotaCommand || antigravity.DEFAULT_COMMAND
+  const { response } = await dialog.showMessageBox({
+    type: 'info',
+    title: '反重力（Antigravity）额度来源',
+    message: '未检测到外部额度命令',
+    detail:
+      `当前配置的命令：\n${cmd}\n\n` +
+      `方式 1（推荐）：安装社区开源 CLI：\n  npm i -g antigravity-usage\n装好后点「重新检测」即可实时显示 Gemini / Claude 各分组额度。\n\n` +
+      `方式 2：也可以由你自己的脚本向以下文件写入标准 JSON：\n  ${antigravity.usagePath()}\n\n` +
+      `如需修改外部命令，可编辑 settings.json 中的 antigravityQuotaCommand。`,
+    buttons: ['重新检测', '打开配置文件夹', '关闭'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  })
+  if (response === 0) antigravity.refreshNow()
+  if (response === 1) shell.openPath(app.getPath('userData'))
 }
 
 async function confirmLogout() {
@@ -254,9 +404,10 @@ function trayIcon() {
   return nativeImage.createFromPath(fs.existsSync(file) ? file : APP_ICON)
 }
 
-// The tray tooltip follows a running update; the menu itself is built each time it opens.
+// The tray tooltip follows a running update and the currently followed host.
 function rebuildTray() {
-  tray.setToolTip(updateProgress ? `Whale Usage：${updateProgress}` : 'Whale Usage：Claude 额度')
+  const hostText = activeHost === 'antigravity' ? 'Antigravity 额度' : 'Claude 额度'
+  tray.setToolTip(updateProgress ? `Whale Usage：${updateProgress}` : `Whale Usage：${hostText}`)
 }
 
 function setSetting(key, value) {
@@ -264,11 +415,44 @@ function setSetting(key, value) {
   saveSettings()
 }
 
+function setTarget(target) {
+  setSetting('target', target)
+  cachedTarget = null
+  if (target === 'claude' || target === 'antigravity') setActiveHost(target)
+  lastBounds = null
+}
+
+function setAntigravityGroup(groupId) {
+  setSetting('antigravityGroupOverride', groupId || 'auto')
+  sendUsage()
+}
+
 // The right-click menu, for the tray icon and the character. Icons are Segoe Fluent Icons code points.
 function openMenu(at) {
   const autoStart = app.getLoginItemSettings().openAtLogin
   const skins = SKINS.map(s => ({ id: `skin:${s.id}`, text: s.name, selected: settings.skin === s.id }))
   if (settings.customSkin) skins.push({ id: 'skin:custom', text: '自定义', selected: settings.skin === 'custom' })
+
+  const showAntigravitySection = settings.target !== 'claude'
+  const agGroups = lastAntigravityPayload?.groups || []
+  const agGroupChips =
+    showAntigravitySection && agGroups.length > 1
+      ? [
+          {
+            type: 'chips',
+            icon: 'E8F1',
+            text: '反重力分组',
+            chips: [
+              { id: 'ag:group:auto', text: '自动', selected: (settings.antigravityGroupOverride || 'auto') === 'auto' },
+              ...agGroups.slice(0, 4).map(g => ({
+                id: `ag:group:${g.id}`,
+                text: g.shortLabel || g.label,
+                selected: settings.antigravityGroupOverride === g.id,
+              })),
+            ],
+          },
+        ]
+      : []
 
   const entries = [
     { type: 'header', icon: 'E9D9', text: `Whale Usage v${app.getVersion()}` },
@@ -279,8 +463,14 @@ function openMenu(at) {
         : []),
     { type: 'separator' },
     { type: 'item', id: 'bubble', icon: 'E8BD', text: '显示额度气泡' },
-    { type: 'item', id: 'show:front', icon: 'E7F4', text: '只在 Claude 是当前窗口时显示', checked: settings.showWhen === 'front' },
-    { type: 'item', id: 'show:open', icon: 'E8A7', text: 'Claude 没最小化就一直显示', checked: settings.showWhen === 'open' },
+    {
+      type: 'chips',
+      icon: 'E737',
+      text: '跟随',
+      chips: TARGETS.map(t => ({ id: `target:${t.id}`, text: t.label, selected: settings.target === t.id })),
+    },
+    { type: 'item', id: 'show:front', icon: 'E7F4', text: '只在目标窗口在前台时显示', checked: settings.showWhen === 'front' },
+    { type: 'item', id: 'show:open', icon: 'E8A7', text: '目标窗口没最小化就一直显示', checked: settings.showWhen === 'open' },
     { type: 'separator' },
     {
       type: 'chips',
@@ -292,9 +482,12 @@ function openMenu(at) {
     { type: 'item', id: 'skin:pick', icon: 'EB9F', text: '用自己的图片…' },
     { type: 'item', id: 'snap', icon: 'E718', text: '贴着输入框', checked: settings.snapToBox },
     { type: 'item', id: 'reset', icon: 'E7A7', text: '重置位置' },
-    { type: 'item', id: 'banner', icon: 'E711', text: '自动关掉「即将达到每周限额」提醒', checked: settings.closeLimitBanner },
+    ...(settings.target !== 'antigravity'
+      ? [{ type: 'item', id: 'banner', icon: 'E711', text: '自动关掉 Claude 每周限额提醒', checked: settings.closeLimitBanner }]
+      : []),
     { type: 'separator' },
-    webUsageEntry(),
+    ...(settings.target !== 'antigravity' ? [webUsageEntry()] : []),
+    ...(showAntigravitySection ? [antigravityQuotaEntry(), ...agGroupChips] : []),
     { type: 'separator' },
     { type: 'item', id: 'notify:wait', icon: 'EA8F', text: '等我回答或批准时提醒', checked: settings.notifyWait },
     { type: 'item', id: 'notify:turn', icon: 'E930', text: '每轮结束提示用了多少额度', checked: settings.notifyTurn },
@@ -303,7 +496,7 @@ function openMenu(at) {
     { type: 'item', id: 'autoupdate', icon: 'E895', text: '自动更新', checked: settings.autoUpdate },
     { type: 'item', id: 'check', icon: 'E72C', text: '检查更新', enabled: !updateProgress },
     { type: 'separator' },
-    { type: 'item', id: 'data', icon: 'E838', text: '打开额度数据文件夹' },
+    { type: 'item', id: 'data', icon: 'E838', text: activeHost === 'antigravity' ? '打开反重力数据文件夹' : '打开 Claude 数据文件夹' },
     { type: 'item', id: 'logs', icon: 'E8A5', text: '打开日志文件夹' },
     { type: 'separator' },
     { type: 'item', id: 'quit', icon: 'E8BB', text: '退出' },
@@ -317,16 +510,20 @@ function openMenu(at) {
     'skin:pick': chooseSkin,
     snap: () => {
       setSetting('snapToBox', !settings.snapToBox)
-      if (!settings.snapToBox && !settings.closeLimitBanner) composer.stop()
+      if (!settings.snapToBox && !settings.closeLimitBanner && activeHost !== 'antigravity') composer.stop()
       lastBounds = null
     },
     banner: () => {
       setSetting('closeLimitBanner', !settings.closeLimitBanner)
-      if (!settings.snapToBox && !settings.closeLimitBanner) composer.stop()
+      if (!settings.snapToBox && !settings.closeLimitBanner && activeHost !== 'antigravity') composer.stop()
     },
     reset: () => {
-      settings.boxAnchor = { ...DEFAULTS.boxAnchor }
-      setSetting('anchor', { ...DEFAULTS.anchor })
+      settings.hostAnchors[activeHost] = DEFAULT_HOST_ANCHOR()
+      if (activeHost === 'claude') {
+        settings.anchor = { ...DEFAULTS.anchor }
+        settings.boxAnchor = { ...DEFAULTS.boxAnchor }
+      }
+      saveSettings()
       lastBounds = null
     },
     sound: () => {
@@ -340,15 +537,31 @@ function openMenu(at) {
     'notify:turn': () => setSetting('notifyTurn', !settings.notifyTurn),
     'web:login': () => webusage.login(),
     'web:logout': confirmLogout,
+    'ag:refresh': () => antigravity.refreshNow(),
+    'ag:help': showAntigravityHelp,
+    'ag:toggle': () => {
+      setSetting('antigravityQuotaEnabled', !settings.antigravityQuotaEnabled)
+      antigravity.configure(
+        {
+          cmd: settings.antigravityQuotaCommand,
+          intervalSec: settings.antigravityQuotaIntervalSec,
+          isEnabled: settings.antigravityQuotaEnabled,
+        },
+        { runImmediately: settings.antigravityQuotaEnabled },
+      )
+    },
+    'ag:group:auto': () => setAntigravityGroup('auto'),
     autostart: () => app.setLoginItemSettings({ openAtLogin: !autoStart }),
     autoupdate: () => setSetting('autoUpdate', !settings.autoUpdate),
     check: () => checkUpdates({ manual: true }),
-    data: () => shell.openPath(path.dirname(usagePath())),
+    data: () => shell.openPath(activeHost === 'antigravity' ? antigravity.whaleDir() : path.dirname(usagePath())),
     logs: () => shell.openPath(log.dir()),
     quit: () => app.quit(),
   }
+  for (const t of TARGETS) handlers[`target:${t.id}`] = () => setTarget(t.id)
   for (const size of SIZES) handlers[`size:${size.scale}`] = () => setScale(size.scale)
   for (const skin of skins) handlers[skin.id] = () => useSkin(skin.id.slice('skin:'.length))
+  for (const g of agGroups) handlers[`ag:group:${g.id}`] = () => setAntigravityGroup(g.id)
 
   menu.show(entries, handlers, at)
 }
@@ -483,25 +696,43 @@ function scheduleUpdateChecks() {
 }
 
 function watchUsage() {
-  const file = usagePath()
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.watchFile(file, { interval: 1500 }, sendUsage)
+  const claudeFile = usagePath()
+  fs.mkdirSync(path.dirname(claudeFile), { recursive: true })
+  fs.watchFile(claudeFile, { interval: 1500 }, () => {
+    if (activeHost === 'claude') sendUsage()
+  })
+
+  const agUsageFile = antigravity.usagePath()
+  const agStateFile = antigravity.statePath()
+  fs.mkdirSync(path.dirname(agUsageFile), { recursive: true })
+  fs.watchFile(agUsageFile, { interval: 1500 }, () => {
+    if (activeHost === 'antigravity') sendUsage()
+  })
+  fs.watchFile(agStateFile, { interval: 1000 }, () => {
+    if (activeHost === 'antigravity') sendUsage()
+  })
 }
 
-// Session states from the plugin: open waits keep a bubble up, new ones and finished turns also make a sound.
+// Session states from Claude & Antigravity plugins: open waits keep a bubble up, new ones and finished turns chime.
 const sessionTracker = sessions.createTracker()
+
+function readAllSessions() {
+  const claudeList = sessions.read(sessionsDir()).map(s => ({ ...s, host: s.host || 'claude' }))
+  const agList = sessions.read(antigravity.sessionsDir()).map(s => ({ ...s, host: s.host || 'antigravity' }))
+  return [...claudeList, ...agList]
+}
 
 function scanSessions() {
   if (!win || win.isDestroyed()) return
-  const { active, newWaits, newTurns } = sessions.track(sessionTracker, sessions.read(sessionsDir()))
-  for (const wait of newWaits) log.info('session waiting', wait.session, wait.kind, wait.tool)
-  for (const turn of newTurns) log.info('turn finished', turn.session, JSON.stringify(turn.deltas))
+  const { active, newWaits, newTurns, completedTurns } = sessions.track(sessionTracker, readAllSessions())
+  for (const wait of newWaits) log.info('session waiting', wait.host, wait.session, wait.kind, wait.tool)
+  for (const turn of newTurns) log.info('turn finished', turn.host, turn.session, JSON.stringify(turn.deltas))
+  if (completedTurns.some(t => t.host === 'antigravity')) antigravity.refreshNow()
   win.webContents.send('waits', { active: settings.notifyWait ? active : [], fresh: settings.notifyWait && newWaits.length > 0 })
-  if (settings.notifyTurn && newTurns.length > 0) win.webContents.send('turn', newTurns[newTurns.length - 1].deltas)
+  if (settings.notifyTurn && newTurns.length > 0) win.webContents.send('turn', newTurns[newTurns.length - 1])
 }
 
-function watchSessions() {
-  const dir = sessionsDir()
+function watchSessionDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
   try {
     sessions.removeOld(dir)
@@ -519,6 +750,11 @@ function watchSessions() {
   } catch (err) {
     log.warn('could not watch the sessions folder, polling only', err.message)
   }
+}
+
+function watchSessions() {
+  watchSessionDir(sessionsDir())
+  watchSessionDir(antigravity.sessionsDir())
   // Also look every few seconds, in case a change notice is missed and so stale waits expire
   setInterval(scanSessions, 3000)
 }
@@ -544,7 +780,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      // Reminder sounds must play while the window is hidden (Claude not in front)
+      // Reminder sounds must play while the window is hidden (host app not in front)
       backgroundThrottling: false,
     },
   })
@@ -586,10 +822,14 @@ ipcMain.on('open-menu', () => openMenu())
 
 ipcMain.on('resize-step', (_e, direction) => setScale(settings.scale + direction * 0.05))
 
+ipcMain.on('select-group', (_e, groupId) => setAntigravityGroup(groupId))
+
 ipcMain.on('drag-end', () => {
   if (!dragging) return
-  if (lastClaudeRect) {
-    Object.assign(settings, anchorFromDrop(win.getBounds()))
+  if (lastHostRect) {
+    const updated = anchorFromDrop(win.getBounds())
+    Object.assign(anchorOf(activeHost), updated)
+    if (activeHost === 'claude') Object.assign(settings, updated)
     saveSettings()
   }
   dragging = null
@@ -613,24 +853,42 @@ if (finishing) {
 } else {
   app.whenReady().then(() => {
     log.init(path.join(app.getPath('userData'), 'logs'))
-    log.info(`start v${app.getVersion()}`, process.env.PORTABLE_EXECUTABLE_FILE ? `portable ${process.env.PORTABLE_EXECUTABLE_FILE}` : 'installed', `usage file ${usagePath()}`)
+    log.info(
+      `start v${app.getVersion()}`,
+      process.env.PORTABLE_EXECUTABLE_FILE ? `portable ${process.env.PORTABLE_EXECUTABLE_FILE}` : 'installed',
+      `claude usage ${usagePath()}`,
+      `antigravity usage ${antigravity.usagePath()}`,
+    )
     process.on('uncaughtException', err => log.error('uncaught', err))
     loadSettings()
     updater.cleanUpAfterUpdate()
     createWindow()
     tray = new Tray(trayIcon())
-    tray.setToolTip('Whale Usage：Claude 额度')
+    tray.setToolTip('Whale Usage：订阅额度')
     tray.on('click', () => win.webContents.send('show-bubble'))
     tray.on('right-click', () => openMenu())
     rebuildTray()
     watchUsage()
-    webusage.start(sendUsage)
+    webusage.start(() => {
+      if (activeHost === 'claude') sendUsage()
+    })
+    antigravity.start(
+      () => {
+        if (activeHost === 'antigravity') sendUsage()
+      },
+      {
+        cmd: settings.antigravityQuotaCommand,
+        intervalSec: settings.antigravityQuotaIntervalSec,
+        isEnabled: settings.antigravityQuotaEnabled,
+      },
+    )
     watchSessions()
     setInterval(tick, TICK_MS)
     scheduleUpdateChecks()
   })
   app.on('will-quit', () => {
     composer.stop()
+    antigravity.stop()
     log.info('quit')
   })
   app.on('window-all-closed', e => e.preventDefault())
