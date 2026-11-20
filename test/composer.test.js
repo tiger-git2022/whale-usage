@@ -36,9 +36,12 @@ test('bannerDue waits for a high weekly figure, spaces checks, and waits for mor
 test('isModelLabel and extractModelLabel recognize Antigravity model picker labels', () => {
   assert.strictEqual(extractModelLabel('Gemini 4 Neon (High)'), 'Gemini 4 Neon (High)')
   assert.strictEqual(extractModelLabel('Gemini 4 Neon 高'), 'Gemini 4 Neon 高')
+  assert.strictEqual(extractModelLabel('Orchestrator (Argon)'), 'Orchestrator (Argon)')
   assert.strictEqual(extractModelLabel('Claude Sonnet 4.6'), 'Claude Sonnet 4.6')
   assert.strictEqual(extractModelLabel('Model: Gemini 2.5 Flash'), 'Gemini 2.5 Flash')
   assert.strictEqual(extractModelLabel('GPT-OSS 120B'), 'GPT-OSS 120B')
+  assert.ok(!isModelLabel('Gemini 4 Neon 中 新建'))
+  assert.ok(!isModelLabel('Gemini 4 Carbon 不可用'))
   assert.ok(!isModelLabel('https://antigravity.google/docs/gemini'))
   assert.ok(!isModelLabel('这是一段很长的聊天消息内容，提到了 Gemini 和 Claude 但是绝对不应该被误认为模型选择器按钮名称'))
   assert.ok(!isModelLabel('line1\nGemini 2.5 Pro'))

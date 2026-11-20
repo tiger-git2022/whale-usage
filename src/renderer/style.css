@@ -111,11 +111,11 @@ html, body {
   position: absolute;
   right: 10px;
   bottom: calc(var(--pet) + 22px);
-  width: 268px;
-  max-height: 166px;
+  width: 292px;
+  max-height: 368px;
   display: flex;
   flex-direction: column;
-  padding: 10px 12px 9px;
+  padding: 11px 13px 10px;
   border-radius: 14px;
   background: var(--card);
   box-shadow: 0 8px 24px rgba(20, 30, 60, 0.25);
@@ -235,9 +235,12 @@ html, body {
 .group.active[data-color="claude"] .group-tag { background: var(--claude); }
 .group.active[data-color="gpt"] .group-tag { background: var(--gpt); }
 
-.group .row { margin: 3px 0 2px; }
-.group .row-top { font-size: 12px; }
-.group .row-top b { font-size: 14px; }
+.group .row { margin: 4px 0 3px; }
+.group .row-top { font-size: 12px; gap: 6px; }
+.group .row-label { display: flex; align-items: baseline; gap: 5px; min-width: 0; overflow: hidden; }
+.group .row-label .name { white-space: nowrap; }
+.group .row-label .reset { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.group .row-top b { font-size: 14px; flex-shrink: 0; }
 .group .muted.reset { font-size: 11px; }
 
 #empty { margin: 4px 0 2px; line-height: 1.5; }

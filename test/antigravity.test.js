@@ -11,32 +11,92 @@ const {
   resolveActiveGroup,
   buildRendererPayload,
   parseJsonStdout,
+  parseUsagePanelTexts,
   isLoginRequired,
 } = require('../src/antigravity')
 const { handleEvent } = require('../antigravity-plugin/scripts/hook')
 
-test('classifyModel maps Gemini, Flash, Claude and GPT variants to expected groups', () => {
-  assert.strictEqual(classifyModel('Gemini 4 Neon (High)'), 'gemini_pro')
-  assert.strictEqual(classifyModel('Gemini 4 Argon (Medium)'), 'gemini_pro')
-  assert.strictEqual(classifyModel('gemini-4-neon-high'), 'gemini_pro')
-  assert.strictEqual(classifyModel('Gemini 4 Neon 高'), 'gemini_pro')
+test('classifyModel maps Gemini, Argon, Flash, Claude and GPT variants to expected groups', () => {
+  assert.strictEqual(classifyModel('Gemini 4 Neon (High)'), 'gemini')
+  assert.strictEqual(classifyModel('Gemini 4 Neon 高'), 'gemini')
+  assert.strictEqual(classifyModel('gemini-4-neon-high'), 'gemini')
+  assert.strictEqual(classifyModel('Gemini 3.8 Flash 中'), 'gemini')
+  assert.strictEqual(classifyModel('Orchestrator (Neon)'), 'gemini')
+  assert.strictEqual(classifyModel('Gemini 4 Argon (Medium)'), 'gemini_argon')
+  assert.strictEqual(classifyModel('Gemini 4 Argon 中'), 'gemini_argon')
+  assert.strictEqual(classifyModel('Orchestrator (Argon)'), 'gemini_argon')
   assert.strictEqual(classifyModel('Gemini 2.5 Pro'), 'gemini_pro')
   assert.strictEqual(classifyModel('Gemini 2.5 Flash'), 'gemini_flash')
   assert.strictEqual(classifyModel('Gemini Flash Lite'), 'gemini_flash')
   assert.strictEqual(classifyModel('Claude Sonnet 4.6'), 'claude')
-  assert.strictEqual(classifyModel('Claude Opus 4.6 (Thinking)'), 'claude')
-  assert.strictEqual(classifyModel('GPT-OSS 120B'), 'gpt')
+  assert.strictEqual(classifyModel('Claude Opus 5.5 (High)'), 'claude')
+  assert.strictEqual(classifyModel('GPT-OSS 120B (Medium)'), 'claude')
   assert.strictEqual(classifyModel('auto'), null)
   assert.strictEqual(classifyModel(''), null)
 })
 
-test('classifyBucket keeps generic gemini pool distinct from pro/flash', () => {
+test('classifyBucket keeps generic gemini pool distinct and merges 3p/gpt into claude', () => {
   assert.strictEqual(classifyBucket('gemini-5h'), 'gemini')
   assert.strictEqual(classifyBucket('gemini-7d'), 'gemini')
+  assert.strictEqual(classifyBucket('Gemini 4 Argon'), 'gemini_argon')
   assert.strictEqual(classifyBucket('gemini-pro-5h'), 'gemini_pro')
   assert.strictEqual(classifyBucket('gemini-flash-5h'), 'gemini_flash')
-  assert.strictEqual(classifyBucket('3p-5h'), 'third_party')
+  assert.strictEqual(classifyBucket('3p-5h'), 'claude')
+  assert.strictEqual(classifyBucket('gpt'), 'claude')
   assert.strictEqual(classifyBucket('claude-sonnet'), 'claude')
+})
+
+test('parseUsagePanelTexts parses Antigravity 2.0 usage panel texts into 5h and weekly limits', () => {
+  const now = Date.parse('2026-11-20T18:40:00.000Z')
+  const parsed = parseUsagePanelTexts(
+    [
+      '使用情况',
+      'Gemini 模型',
+      '每周限额',
+      '70% 剩余',
+      'Resets in 6d 20h',
+      '5h limit',
+      '0% 剩余',
+      'Resets in 1h 16m',
+      'Claude 与 GPT 模型',
+      '每周限额',
+      '48% 剩余',
+      'Resets in 6d 23h',
+      '5h limit',
+      '0% 剩余',
+      'Resets in 4h 47m',
+      'Gemini 4 Argon',
+      '71% 剩余',
+      'Weekly limit, resets in 6d 21h',
+    ],
+    now,
+  )
+  assert.ok(parsed)
+  assert.strictEqual(parsed.groups.length, 3)
+  const gem = parsed.groups.find(g => g.id === 'gemini')
+  const argon = parsed.groups.find(g => g.id === 'gemini_argon')
+  const cla = parsed.groups.find(g => g.id === 'claude')
+  assert.deepStrictEqual(
+    gem.limits.map(l => ({ kind: l.kind, pct: l.percentUsed })),
+    [
+      { kind: 'five_hour', pct: 100 },
+      { kind: 'seven_day', pct: 30 },
+    ],
+  )
+  assert.deepStrictEqual(
+    cla.limits.map(l => ({ kind: l.kind, pct: l.percentUsed })),
+    [
+      { kind: 'five_hour', pct: 100 },
+      { kind: 'seven_day', pct: 52 },
+    ],
+  )
+  assert.deepStrictEqual(
+    argon.limits.map(l => ({ kind: l.kind, pct: l.percentUsed })),
+    [{ kind: 'seven_day', pct: 29 }],
+  )
+  assert.strictEqual(resolveActiveGroup(parsed.groups, 'Gemini 4 Argon 中').id, 'gemini_argon')
+  assert.strictEqual(resolveActiveGroup(parsed.groups, 'Gemini 4 Neon 中').id, 'gemini')
+  assert.strictEqual(resolveActiveGroup(parsed.groups, 'Claude Opus 5.5 中').id, 'claude')
 })
 
 test('normalizeUsage reads antigravity-usage 0.2.x models snapshot with remainingPercentage and isExhausted', () => {
@@ -106,7 +166,7 @@ test('normalizeUsage converts antigravity-usage --json remainingFraction to perc
   assert.ok(normalized)
   assert.strictEqual(normalized.groups.length, 2)
   const gem = normalized.groups.find(g => g.id === 'gemini')
-  const tp = normalized.groups.find(g => g.id === 'third_party')
+  const tp = normalized.groups.find(g => g.id === 'claude')
   assert.strictEqual(gem.limits[0].kind, 'five_hour')
   assert.strictEqual(gem.limits[0].percentUsed, 15)
   assert.strictEqual(tp.limits.length, 2)
@@ -150,10 +210,10 @@ test('resolveActiveGroup selects matching pool and falls back cleanly across gra
 
   assert.strictEqual(resolveActiveGroup(pooled, 'Gemini 4 Neon (High)').id, 'gemini')
   assert.strictEqual(resolveActiveGroup(pooled, 'Gemini 2.5 Flash').id, 'gemini')
-  assert.strictEqual(resolveActiveGroup(pooled, 'Claude Sonnet 4.6').id, 'third_party')
-  assert.strictEqual(resolveActiveGroup(pooled, 'GPT-5').id, 'third_party')
+  assert.strictEqual(resolveActiveGroup(pooled, 'Claude Sonnet 4.6').id, 'claude')
+  assert.strictEqual(resolveActiveGroup(pooled, 'GPT-5').id, 'claude')
   // Manual override wins over activeModel
-  assert.strictEqual(resolveActiveGroup(pooled, 'Gemini 4 Neon (High)', 'third_party').id, 'third_party')
+  assert.strictEqual(resolveActiveGroup(pooled, 'Gemini 4 Neon (High)', 'claude').id, 'claude')
 
   const split = normalizeUsage({
     groups: [
@@ -163,7 +223,7 @@ test('resolveActiveGroup selects matching pool and falls back cleanly across gra
     ],
   }).groups
   assert.strictEqual(resolveActiveGroup(split, 'Gemini 2.5 Flash').id, 'gemini_flash')
-  assert.strictEqual(resolveActiveGroup(split, 'Gemini 4 Neon (High)').id, 'gemini_pro')
+  assert.strictEqual(resolveActiveGroup(split, 'Gemini 2.5 Pro').id, 'gemini_pro')
   assert.strictEqual(resolveActiveGroup(split, 'Claude Opus 4.6').id, 'claude')
 })
 
