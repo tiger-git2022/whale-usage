@@ -12,12 +12,12 @@ const badges = document.getElementById('badges')
 const LABELS = { five_hour: '5 小时', seven_day: '本周', spend_limit: '消费上限', quota: '周期额度' }
 const ORDER = ['five_hour', 'seven_day', 'spend_limit', 'quota']
 const GROUP_SHORT = {
+  gemini: { label: 'Gem', color: 'gemini' },
+  gemini_argon: { label: 'Argon', color: 'flash' },
   gemini_pro: { label: 'Pro', color: 'gemini' },
   gemini_flash: { label: 'Flash', color: 'flash' },
-  gemini: { label: 'Gem', color: 'gemini' },
   claude: { label: 'Cla', color: 'claude' },
-  gpt: { label: 'GPT', color: 'gpt' },
-  third_party: { label: '3P', color: 'claude' },
+  third_party: { label: 'Cla', color: 'claude' },
 }
 const ALERT_AT = [80, 95]
 const AUTO_HIDE_MS = 7000
@@ -93,26 +93,31 @@ function sortedLimits(list) {
   })
 }
 
-function createRowElement(key, limit, color) {
+function createRowElement(key, limit, color, inlineReset = false) {
   const row = document.createElement('div')
   row.className = 'row'
   row.dataset.key = key
   row.dataset.kind = limit.kind
   if (color) row.dataset.color = color
-  row.innerHTML = `
+  row.innerHTML = inlineReset
+    ? `
+    <div class="row-top"><span class="row-label"><span class="name"></span><span class="muted reset"></span></span><b class="pct">0%</b></div>
+    <div class="bar"><i></i></div>`
+    : `
     <div class="row-top"><span class="name"></span><b class="pct">0%</b></div>
     <div class="bar"><i></i></div>
     <div class="muted reset"></div>`
   return row
 }
 
-function updateRowElement(row, key, limit, labelOverride) {
+function updateRowElement(row, key, limit, labelOverride, inlineReset = false) {
   const percent = Math.round(effectivePercent(limit))
   row.querySelector('.name').textContent = labelOverride || limit.label || LABELS[limit.kind] || limit.kind
   const fill = row.querySelector('.bar i')
   fill.style.width = `${Math.min(100, percent)}%`
   fill.className = level(percent)
-  row.querySelector('.reset').textContent = resetText(limit)
+  const rst = resetText(limit)
+  row.querySelector('.reset').textContent = inlineReset && rst ? `· ${rst}` : rst
   const pctEl = row.querySelector('.pct')
   if (shownPercent[key] !== percent) rollTo(pctEl, key, percent)
   else pctEl.textContent = `${percent}%`
@@ -220,8 +225,8 @@ function renderAntigravity() {
 
     for (const limit of sortedLimits(group.limits)) {
       const key = `antigravity:${group.id}:${limit.kind}`
-      const row = createRowElement(key, limit, group.color)
-      updateRowElement(row, key, limit)
+      const row = createRowElement(key, limit, group.color, true)
+      updateRowElement(row, key, limit, null, true)
       card.appendChild(row)
     }
     groupNodes.push(card)

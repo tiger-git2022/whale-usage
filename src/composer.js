@@ -24,13 +24,14 @@ const LIMIT_BANNER = /每周.{0,12}限额|weekly.{0,24}limit/i
 const isLimitBanner = text => LIMIT_BANNER.test(text)
 
 // Model selector button/label patterns near Antigravity's composer (no single quotes).
-const MODEL_LABEL = /\b(?:gemini|claude|gpt|sonnet|opus|haiku|o[134])(?:[\w.\-/+\s()高中低]*[\w)高中低])?/i
+const MODEL_LABEL = /\b(?:gemini|claude|gpt|sonnet|opus|haiku|orchestrator|o[134])(?:[\w.\-/+\s()高中低]*[\w)高中低])?/i
+const MENU_BADGE = /新建|通知|不可用|unavailable|disabled|查看用量|view usage/i
 
 function isModelLabel(text) {
   if (typeof text !== 'string') return false
   const clean = text.trim()
   if (!clean || clean.length > 48 || /[\r\n,;!?\u3002\uff0c\uff01\uff1f\uff1b]/.test(clean)) return false
-  if (/https?:\/\/|[\\/]{2,}/.test(clean)) return false
+  if (/https?:\/\/|[\\/]{2,}/.test(clean) || MENU_BADGE.test(clean)) return false
   return MODEL_LABEL.test(clean)
 }
 
@@ -221,7 +222,7 @@ function Find-AntigravityBox($hwnd) {
 function Match-ModelText($text) {
   if (-not $text) { return $null }
   $t = ([string]$text).Trim()
-  if ($t.Length -eq 0 -or $t.Length -gt 48 -or $t -match '[\r\n,;!?。，！？；]|https?://') { return $null }
+  if ($t.Length -eq 0 -or $t.Length -gt 48 -or $t -match '[\r\n,;!?。，！？；]|https?://|新建|通知|不可用|查看用量') { return $null }
   if ($t -match '${MODEL_LABEL.source}') { return $matches[0].Trim() }
   return $null
 }
@@ -233,32 +234,77 @@ function Find-AntigravityModel($hwnd, $boxEl) {
   if ($boxEl) {
     $scopes += $boxEl
     $p1 = $walker.GetParent($boxEl)
-    if ($p1) {
-      $scopes += $p1
-      $p2 = $walker.GetParent($p1)
-      if ($p2) { $scopes += $p2 }
-    }
+    if ($p1) { $scopes += $p1 }
   }
+  $bestHit = $null
+  $bestBottom = -1
   foreach ($scope in $scopes) {
     foreach ($el in $scope.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelCond)) {
       $c = $el.Current
-      if ($c.IsOffscreen) { continue }
+      $r = $c.BoundingRectangle
+      if ($c.IsOffscreen -or $r.IsEmpty) { continue }
       $hit = Match-ModelText $c.Name
       if (-not $hit) { $hit = Match-ModelText $c.HelpText }
-      if ($hit) { return $hit }
+      if ($hit -and $r.Bottom -gt $bestBottom) {
+        $bestBottom = $r.Bottom
+        $bestHit = $hit
+      }
     }
+    if ($bestHit) { return $bestHit }
   }
   if (-not $rootRect.IsEmpty) {
-    $minTop = $rootRect.Top + $rootRect.Height * 0.55
+    $minTop = $rootRect.Top + $rootRect.Height * 0.65
     foreach ($el in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $modelCond)) {
       $c = $el.Current
       $r = $c.BoundingRectangle
       if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop) { continue }
       $hit = Match-ModelText $c.Name
-      if ($hit) { return $hit }
+      if ($hit -and $r.Bottom -gt $bestBottom) {
+        $bestBottom = $r.Bottom
+        $bestHit = $hit
+      }
     }
   }
-  return $null
+  return $bestHit
+}
+
+function Find-AntigravityUsageTexts($hwnd) {
+  $root = $AE::FromHandle([IntPtr]$hwnd)
+  $anchor = $null
+  foreach ($t in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCond)) {
+    $c = $t.Current
+    if ($c.IsOffscreen) { continue }
+    $nm = ([string]$c.Name).Trim()
+    if ($nm -eq '使用情况' -or $nm -eq 'Usage') {
+      $anchor = $t
+      break
+    }
+  }
+  if (-not $anchor) { return $null }
+  $panel = $anchor
+  for ($i = 0; $i -lt 5; $i++) {
+    $p = $walker.GetParent($panel)
+    if (-not $p) { break }
+    $pr = $p.Current.BoundingRectangle
+    if (-not $pr.IsEmpty -and $pr.Height -ge 120 -and $pr.Width -ge 160 -and $pr.Height -le 700) {
+      $panel = $p
+      break
+    }
+    $panel = $p
+  }
+  $items = @()
+  foreach ($t in $panel.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCond)) {
+    $c = $t.Current
+    $r = $c.BoundingRectangle
+    if ($c.IsOffscreen -or $r.IsEmpty) { continue }
+    $nm = ([string]$c.Name).Trim()
+    if ($nm.Length -gt 0 -and $nm.Length -le 80) {
+      $key = ([int]($r.Top / 6)) * 10000 + [int]$r.Left
+      $items += [PSCustomObject]@{ Key = $key; Text = $nm }
+    }
+  }
+  if ($items.Count -lt 3) { return $null }
+  return @($items | Sort-Object Key | ForEach-Object { $_.Text })
 }
 
 while ($null -ne ($line = [Console]::In.ReadLine())) {
@@ -299,9 +345,13 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     }
     if ($wantModel -and $hostType -eq 'antigravity') {
       $mAge = ([DateTime]::UtcNow - $modelSearched).TotalSeconds
-      if ($hwnd -ne $boxHwnd -or $mAge -ge 1) {
+      if ($hwnd -ne $boxHwnd -or $mAge -ge 0.8) {
         $modelSearched = [DateTime]::UtcNow
         $cachedModel = Find-AntigravityModel $hwnd $box
+        $usageTexts = Find-AntigravityUsageTexts $hwnd
+        if ($usageTexts) {
+          $fields += '"usageTexts":' + (ConvertTo-Json $usageTexts -Compress)
+        }
       }
       if ($cachedModel) {
         $fields += '"model":' + (ConvertTo-Json ([string]$cachedModel) -Compress)
@@ -411,7 +461,8 @@ function answer(line) {
     ? { left: value.wx, top: value.wy, right: value.wx + value.ww, bottom: value.wy + value.wh }
     : null
   const model = typeof value.model === 'string' && value.model.trim() ? extractModelLabel(value.model) : null
-  latest = { hwnd, host, rect, frame, model, at: Date.now() }
+  const usageTexts = Array.isArray(value.usageTexts) && value.usageTexts.length > 0 ? value.usageTexts : null
+  latest = { hwnd, host, rect, frame, model, usageTexts, at: Date.now() }
 }
 
 // Asks for the box of the window `hwnd` (with box) at most every POLL_MS, closes Claude's weekly
@@ -473,6 +524,12 @@ function modelOf(hwnd) {
   return latest.model
 }
 
+// Text lines read from Antigravity's "使用情况 / Usage" popup when open, or null.
+function usageTextsOf(hwnd) {
+  if (!latest || latest.hwnd !== hwnd || latest.host !== 'antigravity') return null
+  return latest.usageTexts
+}
+
 function stop() {
   if (child) child.kill()
   child = null
@@ -480,4 +537,4 @@ function stop() {
   latest = null
 }
 
-module.exports = { poll, boxOf, modelOf, stop, isLimitBanner, isModelLabel, extractModelLabel, bannerDue, fitToWindow }
+module.exports = { poll, boxOf, modelOf, usageTextsOf, stop, isLimitBanner, isModelLabel, extractModelLabel, bannerDue, fitToWindow }

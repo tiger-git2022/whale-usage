@@ -23,12 +23,12 @@ const CMD_TIMEOUT_MS = 15 * 1000
 const REFRESH_COOLDOWN_MS = 5 * 1000
 
 const GROUP_META = {
+  gemini: { id: 'gemini', label: 'Gemini 模型', shortLabel: 'Gem', color: 'gemini', order: 0 },
+  gemini_argon: { id: 'gemini_argon', label: 'Gemini 4 Argon', shortLabel: 'Argon', color: 'flash', order: 1 },
   gemini_pro: { id: 'gemini_pro', label: 'Gemini Pro', shortLabel: 'Pro', color: 'gemini', order: 0 },
   gemini_flash: { id: 'gemini_flash', label: 'Gemini Flash', shortLabel: 'Flash', color: 'flash', order: 1 },
-  gemini: { id: 'gemini', label: 'Gemini', shortLabel: 'Gem', color: 'gemini', order: 0 },
-  claude: { id: 'claude', label: 'Claude', shortLabel: 'Cla', color: 'claude', order: 2 },
-  gpt: { id: 'gpt', label: 'GPT', shortLabel: 'GPT', color: 'gpt', order: 3 },
-  third_party: { id: 'third_party', label: 'Claude / 第三方', shortLabel: '3P', color: 'claude', order: 2 },
+  claude: { id: 'claude', label: 'Claude 模型', shortLabel: 'Cla', color: 'claude', order: 2 },
+  third_party: { id: 'claude', label: 'Claude 模型', shortLabel: 'Cla', color: 'claude', order: 2 },
   other: { id: 'other', label: '其他模型', shortLabel: 'Other', color: 'other', order: 9 },
 }
 
@@ -88,30 +88,33 @@ function extractPercentUsed(entry) {
 }
 
 // Maps any model name or bucket identifier into a normalized quota group id.
+// In Antigravity 2.0, Claude and GPT share the "Claude 与 GPT 模型" pool (mapped to 'claude'),
+// Gemini 4 Argon has its own 'gemini_argon' pool, and other Gemini 4 / 3.8 models share 'gemini'.
 function classifyModel(name) {
   if (!name || typeof name !== 'string') return null
   const text = name.trim().toLowerCase()
   if (!text || text === 'auto' || text === 'default') return null
 
-  if (/\b(claude|sonnet|opus|haiku|anthropic)\b/.test(text) || text.includes('claude')) return 'claude'
-  if (/\b(3p|third[_\-\s]?party)\b/.test(text) || /^3p\b/.test(text)) return 'third_party'
-  if (/\b(gpt|openai|o1|o3|o4|codex)\b/.test(text) || text.includes('gpt-')) return 'gpt'
-  if (text.includes('gemini')) {
-    if (/\b(flash|lite|nano)\b/.test(text) || text.includes('flash')) return 'gemini_flash'
-    if (/\b(pro|ultra|high|neon|argon|next|thinking|preview|2\.5|3|4)\b/.test(text)) return 'gemini_pro'
+  if (/\bargon\b/.test(text) || text.includes('argon')) return 'gemini_argon'
+  if (/\b(claude|sonnet|opus|haiku|anthropic|gpt|openai|o1|o3|o4|codex|3p|third[_\-\s]?party)\b/.test(text) || text.includes('claude') || text.includes('gpt')) {
+    return 'claude'
+  }
+  if (text.includes('gemini') || /\b(neon|hydrogen|carbon|orchestrator)\b/.test(text)) {
+    if (/gemini[_\-\s]?(2\.5|3|3\.5)[_\-\s]?flash|\bflash[_\-\s]?lite\b|^gemini[_\-]flash\b/.test(text)) return 'gemini_flash'
+    if (/gemini[_\-\s]?(2\.5|3)[_\-\s]?pro|^gemini[_\-]pro\b/.test(text)) return 'gemini_pro'
     return 'gemini'
   }
   if (/\b(flash|lite)\b/.test(text)) return 'gemini_flash'
   return null
 }
 
-// Classifies a quota bucket identifier from CLI/JSON output (distinguishing generic `gemini-5h`
-// from explicit `gemini-pro` / `gemini-flash`).
+// Classifies a quota bucket identifier from CLI/JSON output.
 function classifyBucket(name) {
   if (!name || typeof name !== 'string') return 'other'
   const text = name.trim().toLowerCase()
-  if (GROUP_META[text]) return text
-  if (/^gemini([_\-\s]?(5h|7d|daily|weekly|quota|all|pool))?$/.test(text)) return 'gemini'
+  if (text === 'gpt' || text === 'third_party' || /^3p\b/.test(text)) return 'claude'
+  if (GROUP_META[text]) return GROUP_META[text].id
+  if (/^gemini([_\-\s]?(5h|7d|daily|weekly|quota|all|pool|模型|models?))?$/.test(text)) return 'gemini'
   const byModel = classifyModel(text)
   return byModel ?? 'other'
 }
@@ -214,16 +217,17 @@ function normalizeUsage(raw, now = Date.now()) {
   if (Array.isArray(raw.groups)) {
     for (const g of raw.groups) {
       if (!g || typeof g !== 'object') continue
-      const id = g.id ? String(g.id) : classifyBucket(g.family || g.label || g.name || '')
+      const rawId = g.id ? String(g.id) : classifyBucket(g.family || g.label || g.name || '')
+      const id = rawId === 'gpt' || rawId === 'third_party' ? 'claude' : rawId
       const rawLimits = Array.isArray(g.limits) ? g.limits : [g]
       for (const item of rawLimits) {
-        const limit = normalizeLimit(item, g.id || g.label || '')
+        const limit = normalizeLimit(item, g.id || g.label || '', now)
         if (!limit) continue
         addLimitToGroup(
           groupMap,
           id,
           limit,
-          { label: g.label, shortLabel: g.shortLabel, color: g.color, order: g.order },
+          { label: id === 'claude' && /gpt/i.test(g.label || '') ? 'Claude 模型' : g.label, shortLabel: g.shortLabel, color: g.color, order: g.order },
           g.model || null,
         )
       }
@@ -235,6 +239,16 @@ function normalizeUsage(raw, now = Date.now()) {
       }
     }
   } else {
+    // Ignore antigravity-usage's unlinked free-tier Google CloudCode fallback when it reports 100%
+    // remaining (0% used) across the board with no real usage figures.
+    if (
+      raw.method === 'google' &&
+      Array.isArray(raw.models) &&
+      raw.models.length > 0 &&
+      raw.models.every(m => m && (m.remainingPercentage === 1 || m.isAutocompleteOnly))
+    ) {
+      return null
+    }
     const items = Array.isArray(raw)
       ? raw
       : Array.isArray(raw.quotas)
@@ -324,12 +338,11 @@ function resolveActiveGroup(groups, activeModel, overrideGroup = 'auto') {
 
     const family = classifyModel(activeModel)
     const fallbackChain = {
-      gemini_pro: ['gemini_pro', 'gemini', 'gemini_flash'],
+      gemini_argon: ['gemini_argon', 'gemini', 'gemini_pro', 'gemini_flash'],
+      gemini: ['gemini', 'gemini_pro', 'gemini_flash', 'gemini_argon'],
+      gemini_pro: ['gemini_pro', 'gemini', 'gemini_flash', 'gemini_argon'],
       gemini_flash: ['gemini_flash', 'gemini', 'gemini_pro'],
-      gemini: ['gemini', 'gemini_pro', 'gemini_flash'],
       claude: ['claude', 'third_party'],
-      gpt: ['gpt', 'third_party', 'claude'],
-      third_party: ['third_party', 'claude', 'gpt'],
     }[family] || []
 
     for (const candidateId of fallbackChain) {
@@ -364,6 +377,135 @@ function readUsageFile(file = usagePath()) {
     if (err.code !== 'ENOENT') log.warn('could not read antigravity usage file', err.message)
     return null
   }
+}
+
+function saveUsageFile(usage, file = usagePath()) {
+  if (!usage || !Array.isArray(usage.groups) || usage.groups.length === 0) return
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(usage, null, 2))
+  } catch (err) {
+    log.warn('could not save antigravity usage file', err.message)
+  }
+}
+
+function parseRelativeResetIso(text, now = Date.now()) {
+  if (typeof text !== 'string') return undefined
+  const en = text.match(/resets?\s+in\s+(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?/i)
+  if (en && (en[1] || en[2] || en[3])) {
+    const d = Number(en[1] || 0)
+    const h = Number(en[2] || 0)
+    const m = Number(en[3] || 0)
+    const ms = ((d * 24 + h) * 60 + m) * 60 * 1000
+    if (ms > 0) return new Date(now + ms).toISOString()
+  }
+  const zh = text.match(/(?:(\d+)\s*天)?\s*(?:(\d+)\s*小时)?\s*(?:(\d+)\s*分(?:钟)?)?\s*(?:后)?重置/)
+  if (zh && (zh[1] || zh[2] || zh[3])) {
+    const d = Number(zh[1] || 0)
+    const h = Number(zh[2] || 0)
+    const m = Number(zh[3] || 0)
+    const ms = ((d * 24 + h) * 60 + m) * 60 * 1000
+    if (ms > 0) return new Date(now + ms).toISOString()
+  }
+  return undefined
+}
+
+// Parses text nodes collected from Antigravity 2.0's "使用情况 / Usage" popup via UI Automation.
+function parseUsagePanelTexts(texts, now = Date.now()) {
+  if (!Array.isArray(texts) || texts.length === 0) return null
+  const groupMap = new Map()
+  let currentGroupId = null
+  let currentGroupLabel = null
+  let pendingKind = null
+  let lastLimit = null
+
+  const ensureGroup = (id, label) => {
+    currentGroupId = id
+    currentGroupLabel = label
+    pendingKind = null
+    lastLimit = null
+  }
+
+  for (const raw of texts) {
+    const line = String(raw || '').trim()
+    if (!line || /^(使用情况|usage|查看用量|view usage)$/i.test(line)) continue
+
+    // Check if the line names a group header
+    if (/^gemini\s*(模型|models?)$/i.test(line)) {
+      ensureGroup('gemini', 'Gemini 模型')
+      continue
+    }
+    if (/^claude(\s*(与|&|and)\s*gpt)?\s*(模型|models?)?$/i.test(line)) {
+      ensureGroup('claude', 'Claude 模型')
+      continue
+    }
+    if (/^gemini\s+4\s+argon/i.test(line) && !/%/.test(line)) {
+      ensureGroup('gemini_argon', 'Gemini 4 Argon')
+      continue
+    }
+
+    // Window label inside a group
+    if (/^(每周限额|weekly\s+limit)$/i.test(line)) {
+      pendingKind = 'seven_day'
+      continue
+    }
+    if (/^(5h\s+limit|5\s*小时限额|5\s*小时)$/i.test(line)) {
+      pendingKind = 'five_hour'
+      continue
+    }
+
+    // Combined group header + percentage on one line, e.g. "Gemini 4 Argon 71% 剩余"
+    const headPct = line.match(/^(gemini[\w\s.\-()]+|claude[\w\s.\-()]+?)\s+(\d+(?:\.\d+)?)\s*%\s*(剩余|remaining|left|已用|used)/i)
+    if (headPct) {
+      const gTitle = headPct[1].trim()
+      const gId = classifyBucket(gTitle)
+      ensureGroup(gId, gId === 'claude' ? 'Claude 模型' : gTitle)
+    }
+
+    // Percentage reading: "70% 剩余" -> 30% used
+    const remMatch = line.match(/(\d+(?:\.\d+)?)\s*%\s*(?:剩余|remaining|left)/i)
+    const usedMatch = !remMatch && line.match(/(\d+(?:\.\d+)?)\s*%\s*(?:已用|used)/i)
+    if ((remMatch || usedMatch) && currentGroupId) {
+      const pct = remMatch ? clampPercent(100 - Number(remMatch[1])) : clampPercent(Number(usedMatch[1]))
+      const kind =
+        /weekly|每周/i.test(line) ? 'seven_day'
+        : /5h|5\s*小时/i.test(line) ? 'five_hour'
+        : pendingKind || (currentGroupId === 'gemini_argon' ? 'seven_day' : 'five_hour')
+      const resetsAt = parseRelativeResetIso(line, now)
+      const limit = {
+        kind,
+        label: WINDOW_LABELS[kind] || kind,
+        percentUsed: pct,
+        ...(resetsAt ? { resetsAt } : {}),
+      }
+      addLimitToGroup(groupMap, currentGroupId, limit, { label: currentGroupLabel })
+      const grp = groupMap.get(currentGroupId)
+      lastLimit = grp.limits.find(l => l.kind === kind) || limit
+      pendingKind = null
+      continue
+    }
+
+    // Reset line (may also clarify whether the previous single-row reading was Weekly or 5h)
+    const resetsAt = parseRelativeResetIso(line, now)
+    if (resetsAt && lastLimit && currentGroupId) {
+      if (/weekly|每周/i.test(line) && lastLimit.kind !== 'seven_day') {
+        lastLimit.kind = 'seven_day'
+        lastLimit.label = WINDOW_LABELS.seven_day
+      } else if (/5h|5\s*小时/i.test(line) && lastLimit.kind !== 'five_hour') {
+        lastLimit.kind = 'five_hour'
+        lastLimit.label = WINDOW_LABELS.five_hour
+      }
+      lastLimit.resetsAt = resetsAt
+    }
+  }
+
+  const groups = [...groupMap.values()]
+  if (groups.length === 0) return null
+  for (const g of groups) {
+    g.limits.sort((a, b) => (a.kind === 'five_hour' ? -1 : b.kind === 'five_hour' ? 1 : a.kind.localeCompare(b.kind)))
+  }
+  groups.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
+  return { updatedAt: now, activeModel: null, groups }
 }
 
 // Builds the normalized payload sent to the renderer for Antigravity mode.
@@ -712,6 +854,9 @@ module.exports = {
   resolveActiveGroup,
   readState,
   readUsageFile,
+  saveUsageFile,
+  parseUsagePanelTexts,
+  parseRelativeResetIso,
   buildRendererPayload,
   parseJsonStdout,
   isLoginRequired,

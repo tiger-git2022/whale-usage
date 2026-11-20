@@ -15,7 +15,7 @@ const { targetState } = require('./win32')
 
 // The widget window at 100% size: the character sits at its bottom-right, the bubble above it.
 // The page is zoomed by settings.scale, so these all scale together.
-const BASE = { w: 300, h: 300, inset: 6, pet: 108 }
+const BASE = { w: 320, h: 520, inset: 6, pet: 108 }
 const SCALE_MIN = 0.4
 const SCALE_MAX = 1.2
 const SIZES = [
@@ -95,6 +95,7 @@ let pendingUpdate = null // the newer release found by the last check
 let updateProgress = null // text while an update downloads
 let weeklyPercent = null // Claude's highest weekly window's use, from the last usage read, or null
 let lastUiModel = null // latest model name read from Antigravity via UI Automation
+let lastUiUsageSignature = null // latest "使用情况" panel snapshot read via UI Automation
 let lastAntigravityPayload = null // latest renderer payload for Antigravity (for menu chips)
 
 function cloneDefaults() {
@@ -244,6 +245,19 @@ function tick() {
       log.info('antigravity ui model:', uiModel)
       lastUiModel = uiModel
       sendUsage()
+    }
+    const uiTexts = composer.usageTextsOf(state.window.hwnd)
+    if (uiTexts) {
+      const sig = uiTexts.join('|')
+      if (sig !== lastUiUsageSignature) {
+        lastUiUsageSignature = sig
+        const parsed = antigravity.parseUsagePanelTexts(uiTexts, Date.now())
+        if (parsed) {
+          log.info('synced antigravity usage from UI panel:', sig)
+          antigravity.saveUsageFile(parsed)
+          sendUsage()
+        }
+      }
     }
   }
 
