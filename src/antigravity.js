@@ -1,9 +1,11 @@
-// Antigravity quota protocol, model-to-group mapping, and optional external CLI polling.
+// Antigravity quota protocol, model-to-group mapping, native local reading, and optional CLI polling.
 //
-// Reads two local sources and merges them into a unified multi-group usage object (all percents are
+// Reads three local sources and merges them into a unified multi-group usage object (all percents are
 // normalized to percentUsed 0..100 so alerts and colors match the Claude widget):
-//   1. ~/.gemini/antigravity/whale/usage.json   standard multi-group usage file (or custom script output)
-//   2. External quota command (default: `antigravity-usage quota --json`) run periodically and after turns
+//   1. Antigravity 2.0's language_server.exe RPC (RetrieveUserQuotaSummary / GetUserStatus), read
+//      directly from localhost. This is the authoritative source for the weekly + 5-hour pools.
+//   2. ~/.gemini/antigravity/whale/usage.json   standard multi-group usage file (or custom script output)
+//   3. External quota command (default: `antigravity-usage quota --json`) as a fallback
 //
 // Current model detection combines:
 //   - UI Automation text near Antigravity's input box (instant, even before sending a message)
@@ -11,16 +13,21 @@
 
 const { exec, execFile, spawn } = require('child_process')
 const fs = require('fs')
+const http = require('http')
+const https = require('https')
 const os = require('os')
 const path = require('path')
 const log = require('./log')
 
 const DEFAULT_COMMAND = 'antigravity-usage quota --json --refresh'
 const DEFAULT_INTERVAL_SEC = 60
-const MISSING_RETRY_MS = 5 * 60 * 1000
 const ERROR_RETRY_MS = 2 * 60 * 1000
 const CMD_TIMEOUT_MS = 15 * 1000
 const REFRESH_COOLDOWN_MS = 5 * 1000
+const LOCAL_DISCOVERY_TIMEOUT_MS = 8 * 1000
+const LOCAL_RPC_TIMEOUT_MS = 1500
+const QUOTA_SUMMARY_PATH = '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary'
+const USER_STATUS_PATH = '/exa.language_server_pb.LanguageServerService/GetUserStatus'
 
 const GROUP_META = {
   gemini: { id: 'gemini', label: 'Gemini 模型', shortLabel: 'Gem', color: 'gemini', order: 0 },
@@ -508,6 +515,327 @@ function parseUsagePanelTexts(texts, now = Date.now()) {
   return { updatedAt: now, activeModel: null, groups }
 }
 
+// --- Native Antigravity 2.0 language_server RPC ---------------------------
+//
+// Antigravity 2.0 starts language_server.exe with several listening ports. Most of them answer 401
+// (or reject plain HTTP on the TLS port), and only one exposes the real quota RPC. We therefore probe
+// every port with both protocols, accept only HTTP 200 responses, and validate the JSON body. The
+// 2.0-only RetrieveUserQuotaSummary RPC returns the weekly + 5-hour buckets; GetUserStatus is kept as
+// a fallback for older builds that only expose per-model remainingFraction.
+
+function responseBody(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  return raw.response && typeof raw.response === 'object' ? raw.response : raw
+}
+
+function parseGroupModels(description) {
+  const text = String(description || '')
+  const match = text.match(
+    /(?:models? (?:within|in) this group|此组内(?:的)?模型|该分组包含(?:以下)?模型)\s*[:：]\s*(.+)$/i,
+  )
+  if (!match) return []
+  return match[1]
+    .split(/[,，、;；]/)
+    .map(part => part.trim().replace(/[.。]$/, ''))
+    .filter(Boolean)
+}
+
+function classifyQuotaSummaryGroup(displayName, description, buckets) {
+  const firstBucket = Array.isArray(buckets) ? buckets.find(bucket => bucket && typeof bucket === 'object') : null
+  const bucketId = firstBucket ? firstBucket.bucketId || firstBucket.bucket_id || '' : ''
+  const byName = classifyModel(displayName)
+  if (byName) return byName
+  const byBucket = classifyModel(bucketId)
+  if (byBucket) return byBucket
+  if (/argon/i.test(String(description || ''))) return 'gemini_argon'
+  if (/claude|gpt|3p|third[\s_-]?party/i.test(String(description || ''))) return 'claude'
+  return 'gemini'
+}
+
+// Parses language_server's RetrieveUserQuotaSummary response into the standard multi-group schema.
+function parseQuotaSummary(raw, now = Date.now()) {
+  const body = responseBody(raw)
+  if (!body || typeof body !== 'object') return null
+  const rawGroups = Array.isArray(body.groups)
+    ? body.groups
+    : Array.isArray(body.quotaGroups)
+      ? body.quotaGroups
+      : null
+  if (!rawGroups || rawGroups.length === 0) return null
+
+  const groupMap = new Map()
+  for (const group of rawGroups) {
+    if (!group || typeof group !== 'object') continue
+    const displayName = String(group.displayName || group.display_name || '')
+    const description = String(group.description || '')
+    const buckets = Array.isArray(group.buckets)
+      ? group.buckets
+      : Array.isArray(group.limits)
+        ? group.limits
+        : []
+    const id = classifyQuotaSummaryGroup(displayName, description, buckets)
+    let added = false
+    for (const bucket of buckets) {
+      if (!bucket || typeof bucket !== 'object') continue
+      if (bucket.disabled === true || bucket.disabled === 'true') continue
+      const percentUsed = extractPercentUsed(bucket)
+      if (percentUsed === null) continue
+      const kind = inferWindowKind(
+        String(bucket.window || bucket.bucketId || bucket.bucket_id || bucket.displayName || bucket.display_name || ''),
+      )
+      const resetsAt = normalizeIso(
+        bucket.resetTime || bucket.reset_time || bucket.resetsAt || bucket.resets_at,
+      )
+      addLimitToGroup(
+        groupMap,
+        id,
+        { kind, label: WINDOW_LABELS[kind] || kind, percentUsed, ...(resetsAt ? { resetsAt } : {}) },
+        { label: GROUP_META[id]?.label },
+      )
+      added = true
+    }
+    if (!added) continue
+    const entry = groupMap.get(id)
+    for (const model of parseGroupModels(description)) {
+      if (!entry.models.includes(model)) entry.models.push(model)
+    }
+  }
+
+  const groups = [...groupMap.values()]
+  if (groups.length === 0) return null
+  for (const group of groups) {
+    group.limits.sort((a, b) => (a.kind === 'five_hour' ? -1 : b.kind === 'five_hour' ? 1 : a.kind.localeCompare(b.kind)))
+  }
+  groups.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
+  return { updatedAt: now, activeModel: null, groups }
+}
+
+// Fallback for language_server builds without RetrieveUserQuotaSummary: GetUserStatus exposes each
+// model's remainingFraction under cascadeModelConfigData.clientModelConfigs.
+function parseUserStatus(raw, now = Date.now()) {
+  const body = responseBody(raw)
+  if (!body || typeof body !== 'object') return null
+  const status = body.userStatus || body.user_status || body
+  const cascade = status.cascadeModelConfigData || status.cascade_model_config_data
+  const configs = cascade?.clientModelConfigs || cascade?.client_model_configs
+  if (!Array.isArray(configs) || configs.length === 0) return null
+
+  const models = []
+  for (const config of configs) {
+    if (!config || typeof config !== 'object') continue
+    const quota = config.quotaInfo || config.quota_info
+    if (!quota || typeof quota !== 'object') continue
+    const remaining = quota.remainingFraction ?? quota.remaining_fraction
+    if (typeof remaining !== 'number' || !Number.isFinite(remaining)) continue
+    const label = String(config.label || config.displayName || config.display_name || config.modelId || config.model_id || '')
+    if (!label || /autocomplete/i.test(label)) continue
+    models.push({
+      label,
+      modelId: config.modelId || config.model_id,
+      remainingPercentage: remaining,
+      resetTime: quota.resetTime || quota.reset_time,
+    })
+  }
+  if (models.length === 0) return null
+  return normalizeUsage({ timestamp: new Date(now).toISOString(), method: 'local', models }, now)
+}
+
+function parseLanguageServerProcesses(stdout) {
+  const text = String(stdout || '').replace(/^\uFEFF/, '').trim()
+  if (!text) return []
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch {
+    return []
+  }
+  const list = Array.isArray(data) ? data : data && typeof data === 'object' ? [data] : []
+  const servers = []
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    const pid = Number(item.pid ?? item.processId)
+    const token = String(item.token ?? item.csrfToken ?? '').replace(/^['"]|['"]$/g, '')
+    const ports = Array.isArray(item.ports)
+      ? [...new Set(item.ports.map(Number).filter(port => Number.isInteger(port) && port > 0 && port < 65536))]
+      : []
+    if (!Number.isInteger(pid) || pid <= 0 || !token) continue
+    servers.push({ pid, token, ports })
+  }
+  return servers
+}
+
+const DISCOVERY_SCRIPT = [
+  "$ErrorActionPreference = 'SilentlyContinue'",
+  '$items = @()',
+  "Get-CimInstance Win32_Process -Filter \"Name='language_server.exe'\" | ForEach-Object {",
+  '  $proc = $_',
+  '  $cmd = [string]$proc.CommandLine',
+  "  if ($cmd -match 'antigravity') {",
+  "    $token = ''",
+  "    if ($cmd -match '--csrf_token(?:=|\\s+)([^\\s]+)') { $token = $Matches[1] }",
+  '    if ($token) {',
+  '      $ports = @()',
+  '      try { $ports = @(Get-NetTCPConnection -State Listen -OwningProcess $proc.ProcessId -ErrorAction Stop | Select-Object -ExpandProperty LocalPort) } catch { $ports = @() }',
+  '      if ($ports.Count -eq 0) {',
+  "        $ports = @(netstat -ano -p tcp | Select-String -Pattern 'LISTENING' | ForEach-Object { $parts = @(($_.Line -split '\\s+') | Where-Object { $_ }); if ($parts.Count -ge 5 -and $parts[-1] -eq [string]$proc.ProcessId) { [int](($parts[1] -split ':')[-1]) } })",
+  '      }',
+  '      $items += [pscustomobject]@{ pid = [int]$proc.ProcessId; token = $token; ports = @($ports | Sort-Object -Unique) }',
+  '    }',
+  '  }',
+  '}',
+  'ConvertTo-Json -InputObject @($items) -Compress -Depth 4',
+].join('; ')
+
+function runPowerShell(script) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'powershell.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, timeout: LOCAL_DISCOVERY_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          if (stderr && !err.stderr) err.stderr = stderr
+          reject(err)
+        } else {
+          resolve(stdout)
+        }
+      },
+    )
+  })
+}
+
+function discoverLanguageServers() {
+  if (process.platform !== 'win32') return Promise.resolve([])
+  return runPowerShell(DISCOVERY_SCRIPT).then(parseLanguageServerProcesses)
+}
+
+function requestLocalJson({ port, protocol, token, rpcPath, body = '{}' }) {
+  return new Promise(resolve => {
+    let settled = false
+    const finish = value => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const transport = protocol === 'https' ? https : http
+    let req
+    try {
+      req = transport.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: rpcPath,
+          method: 'POST',
+          rejectUnauthorized: false,
+          timeout: LOCAL_RPC_TIMEOUT_MS,
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            'Connect-Protocol-Version': '1',
+            'X-Codeium-Csrf-Token': token,
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        res => {
+          let text = ''
+          res.setEncoding('utf8')
+          res.on('data', chunk => {
+            text += chunk
+            if (text.length > 1024 * 1024) {
+              req.destroy()
+              finish(null)
+            }
+          })
+          res.on('end', () => {
+            if (res.statusCode !== 200) return finish(null)
+            try {
+              finish(JSON.parse(text))
+            } catch {
+              finish(null)
+            }
+          })
+          res.on('aborted', () => finish(null))
+          res.on('error', () => finish(null))
+        },
+      )
+    } catch {
+      finish(null)
+      return
+    }
+    req.on('timeout', () => {
+      req.destroy()
+      finish(null)
+    })
+    req.on('error', () => finish(null))
+    req.end(body)
+  })
+}
+
+function localCandidates(servers) {
+  const candidates = []
+  for (const server of servers) {
+    for (const port of server.ports || []) {
+      for (const protocol of ['https', 'http']) {
+        candidates.push({ port, protocol, token: server.token })
+      }
+    }
+  }
+  return candidates
+}
+
+async function fetchQuotaSummary(servers, now) {
+  const candidates = localCandidates(servers)
+  const results = await Promise.all(
+    candidates.map(async candidate => {
+      const json = await requestLocalJson({ ...candidate, rpcPath: QUOTA_SUMMARY_PATH })
+      const usage = json ? parseQuotaSummary(json, now) : null
+      return usage ? { usage, endpoint: `${candidate.protocol}://127.0.0.1:${candidate.port}` } : null
+    }),
+  )
+  return results.find(Boolean) || null
+}
+
+async function fetchUserStatus(servers, now) {
+  const candidates = localCandidates(servers)
+  const results = await Promise.all(
+    candidates.map(async candidate => {
+      const json = await requestLocalJson({ ...candidate, rpcPath: USER_STATUS_PATH })
+      const usage = json ? parseUserStatus(json, now) : null
+      return usage ? { usage, endpoint: `${candidate.protocol}://127.0.0.1:${candidate.port}` } : null
+    }),
+  )
+  return results.find(Boolean) || null
+}
+
+// Reads Antigravity 2.0's own quota RPC from localhost. Returns { ok, usage?, endpoint?, code?, error? }.
+async function readLocalQuota({ now = Date.now() } = {}) {
+  if (process.platform !== 'win32') {
+    return { ok: false, code: 'unsupported', error: '当前系统暂不支持直接读取反重力本地额度' }
+  }
+  let servers
+  try {
+    servers = await discoverLanguageServers()
+  } catch (err) {
+    return { ok: false, code: 'discovery-failed', error: err.message || '无法读取反重力进程' }
+  }
+  if (servers.length === 0) {
+    return { ok: false, code: 'not-running', error: '未检测到正在运行的反重力' }
+  }
+  const withPorts = servers.filter(server => server.ports.length > 0)
+  if (withPorts.length === 0) {
+    return { ok: false, code: 'no-ports', error: '反重力本地服务没有开放端口' }
+  }
+  const summary = await fetchQuotaSummary(withPorts, now)
+  if (summary) {
+    return { ok: true, usage: summary.usage, endpoint: summary.endpoint, source: 'quota-summary' }
+  }
+  const legacy = await fetchUserStatus(withPorts, now)
+  if (legacy) {
+    return { ok: true, usage: legacy.usage, endpoint: legacy.endpoint, source: 'user-status' }
+  }
+  return { ok: false, code: 'rpc-failed', error: '反重力本地服务没有返回额度数据（可能版本不兼容）' }
+}
+
 // Builds the normalized payload sent to the renderer for Antigravity mode.
 function buildRendererPayload({ usage, activeModel, overrideGroup = 'auto', quotaStatus = 'empty', quotaError = null }) {
   const groups = usage?.groups || []
@@ -571,13 +899,16 @@ function isLoginRequired(err, stdout, stderr) {
   )
 }
 
-// Polls an optional external quota CLI (default `antigravity-usage quota --json --refresh`).
+// Polls Antigravity's own local quota RPC first, then falls back to the optional external quota CLI
+// (default `antigravity-usage quota --json --refresh`).
 let command = DEFAULT_COMMAND
 let intervalMs = DEFAULT_INTERVAL_SEC * 1000
 let enabled = true
-let status = 'idle' // 'idle' | 'ok' | 'missing-cli' | 'needs-login' | 'logging-in' | 'error' | 'disabled'
+let status = 'idle' // 'idle' | 'ok' | 'not-running' | 'missing-cli' | 'needs-login' | 'logging-in' | 'error' | 'disabled'
 let lastError = null
-let latestCli = null
+let latestQuota = null
+let latestSource = null // 'native' | 'cli' | null
+let nativeError = null
 let timer = null
 let running = false
 let loggingIn = false
@@ -586,8 +917,109 @@ let onChange = () => {}
 
 function scheduleNext(delay) {
   clearTimeout(timer)
-  if (!enabled || !command) return
+  if (!enabled) return
   timer = setTimeout(() => runOnce(), delay)
+}
+
+function finishPoll(nextStatus, error, delay) {
+  running = false
+  status = nextStatus
+  lastError = error || null
+  onChange()
+  scheduleNext(delay)
+}
+
+function nativeUnavailableStatus(nativeResult) {
+  if (nativeResult?.code === 'not-running') return 'not-running'
+  if (nativeResult?.code === 'unsupported') return 'error'
+  return 'error'
+}
+
+function settleNativeFailure(nativeResult) {
+  const next = nativeUnavailableStatus(nativeResult)
+  const message = nativeResult?.error || '读取反重力本地额度失败'
+  if (status !== next || lastError !== message) log.warn('antigravity local quota unavailable:', message)
+  finishPoll(next, message, next === 'not-running' ? intervalMs : ERROR_RETRY_MS)
+}
+
+function applyNativeResult(result) {
+  if (!enabled) {
+    running = false
+    status = 'disabled'
+    return
+  }
+  const changedSource = latestSource !== 'native'
+  latestQuota = result.usage
+  latestSource = 'native'
+  nativeError = null
+  if (changedSource) log.info(`antigravity local quota: ${result.endpoint} (${result.source})`)
+  finishPoll('ok', null, intervalMs)
+}
+
+function fallbackToCommand(nativeResult) {
+  if (!enabled) {
+    running = false
+    status = 'disabled'
+    return
+  }
+  if (!command) {
+    settleNativeFailure(nativeResult)
+    return
+  }
+  // When Antigravity itself is closed, the default CLI would only query Google's old free-tier
+  // endpoint and return a fake 100% snapshot, so don't spawn it every minute. A custom command may
+  // still fetch quotas remotely, so it keeps running.
+  if (nativeResult?.code === 'not-running' && command === DEFAULT_COMMAND) {
+    settleNativeFailure(nativeResult)
+    return
+  }
+
+  executeQuotaCommand(command, (err, stdout, stderr) => {
+    if (!enabled) {
+      running = false
+      status = 'disabled'
+      return
+    }
+    if (err) {
+      if (isCommandNotFound(err, stderr)) {
+        if (nativeResult?.code === 'not-running' || nativeResult?.code === 'rpc-failed' || nativeResult?.code === 'no-ports') {
+          settleNativeFailure(nativeResult)
+          return
+        }
+        if (status !== 'missing-cli') log.info('antigravity quota command not found:', command)
+        finishPoll('missing-cli', `未检测到命令：${command}`, 5 * 60 * 1000)
+        return
+      }
+      if (isLoginRequired(err, stdout, stderr) && nativeResult?.code !== 'not-running') {
+        if (status !== 'needs-login') log.info('antigravity quota needs Google login (antigravity-usage login)')
+        finishPoll('needs-login', '需要登录一次 Google 账号', 5 * 60 * 1000)
+        return
+      }
+      const message = (stderr || stdout || err.message || 'unknown error').trim().slice(0, 180)
+      if (nativeResult?.error) log.warn('antigravity quota command failed:', message)
+      settleNativeFailure(nativeResult)
+      return
+    }
+
+    try {
+      const parsed = parseJsonStdout(stdout)
+      const normalized = normalizeUsage(parsed, Date.now())
+      if (!normalized) {
+        // The CLI's cloud mode returns a hard-coded 100% remaining snapshot with no real usage.
+        settleNativeFailure(nativeResult)
+        return
+      }
+      const changedSource = latestSource !== 'cli'
+      latestQuota = normalized
+      latestSource = 'cli'
+      if (changedSource) log.info('antigravity quota from external command:', command)
+      finishPoll('ok', null, intervalMs)
+    } catch (parseErr) {
+      const message = parseErr.message || 'JSON 解析失败'
+      if (message !== lastError) log.warn('antigravity quota output unreadable:', message)
+      settleNativeFailure(nativeResult)
+    }
+  })
 }
 
 // Opens the browser via `antigravity-usage login --no-browser` (using Electron's bundled Node and
@@ -681,8 +1113,11 @@ function login(openUrl) {
 
 function logout() {
   runAntigravityCli(['logout', '--all'], CMD_TIMEOUT_MS, () => {
-    latestCli = null
-    status = 'needs-login'
+    if (latestSource !== 'native') {
+      latestQuota = null
+      latestSource = null
+      status = 'needs-login'
+    }
     lastError = null
     log.info('signed out of antigravity-usage')
     onChange()
@@ -754,7 +1189,7 @@ function executeQuotaCommand(cmd, callback) {
 }
 
 function runOnce({ force = false } = {}) {
-  if (!enabled || !command) {
+  if (!enabled) {
     status = 'disabled'
     return
   }
@@ -765,53 +1200,25 @@ function runOnce({ force = false } = {}) {
   lastRunAt = now
   clearTimeout(timer)
 
-  executeQuotaCommand(command, (err, stdout, stderr) => {
-    running = false
-    if (err) {
-      if (isCommandNotFound(err, stderr)) {
-        if (status !== 'missing-cli') log.info('antigravity quota command not found:', command)
-        status = 'missing-cli'
-        lastError = `未检测到命令：${command}`
-        onChange()
-        scheduleNext(MISSING_RETRY_MS)
+  readLocalQuota()
+    .then(result => {
+      if (!enabled) {
+        running = false
+        status = 'disabled'
         return
       }
-      if (isLoginRequired(err, stdout, stderr)) {
-        if (status !== 'needs-login') log.info('antigravity quota needs Google login (antigravity-usage login)')
-        status = 'needs-login'
-        lastError = '需要登录一次 Google 账号'
-        onChange()
-        scheduleNext(MISSING_RETRY_MS)
+      if (result.ok) {
+        applyNativeResult(result)
         return
       }
-      const message = (stderr || stdout || err.message || 'unknown error').trim().slice(0, 180)
-      if (message !== lastError) log.warn('antigravity quota command failed:', message)
-      status = 'error'
-      lastError = message
-      onChange()
-      scheduleNext(ERROR_RETRY_MS)
-      return
-    }
-
-    try {
-      const parsed = parseJsonStdout(stdout)
-      const normalized = normalizeUsage(parsed, Date.now())
-      if (normalized) {
-        latestCli = normalized
-      }
-      status = 'ok'
-      lastError = null
-      onChange()
-      scheduleNext(intervalMs)
-    } catch (parseErr) {
-      const message = parseErr.message || 'JSON 解析失败'
-      if (message !== lastError) log.warn('antigravity quota output unreadable:', message)
-      status = 'error'
-      lastError = message
-      onChange()
-      scheduleNext(ERROR_RETRY_MS)
-    }
-  })
+      nativeError = result.error || null
+      fallbackToCommand(result)
+    })
+    .catch(err => {
+      const result = { ok: false, code: 'error', error: err?.message || '读取反重力本地额度失败' }
+      nativeError = result.error
+      fallbackToCommand(result)
+    })
 }
 
 function start(changed, options = {}) {
@@ -824,9 +1231,11 @@ function configure({ cmd, intervalSec, isEnabled } = {}, { runImmediately = fals
   if (typeof intervalSec === 'number' && intervalSec >= 10) intervalMs = intervalSec * 1000
   if (typeof isEnabled === 'boolean') enabled = isEnabled
   clearTimeout(timer)
-  if (!enabled || !command) {
+  if (!enabled) {
     status = 'disabled'
-    latestCli = null
+    latestQuota = null
+    latestSource = null
+    nativeError = null
     lastError = null
     onChange()
     return
@@ -858,6 +1267,10 @@ module.exports = {
   saveUsageFile,
   parseUsagePanelTexts,
   parseRelativeResetIso,
+  parseQuotaSummary,
+  parseUserStatus,
+  parseLanguageServerProcesses,
+  readLocalQuota,
   buildRendererPayload,
   parseJsonStdout,
   isLoginRequired,
@@ -867,6 +1280,6 @@ module.exports = {
   login,
   logout,
   refreshNow: () => runOnce({ force: true }),
-  state: () => ({ status, error: lastError, command, enabled }),
-  latest: () => latestCli,
+  state: () => ({ status, error: lastError, command, enabled, source: latestSource, nativeError }),
+  latest: () => latestQuota,
 }

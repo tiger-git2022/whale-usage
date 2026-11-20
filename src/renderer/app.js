@@ -127,8 +127,11 @@ function emptyMessageFor(u) {
   if (hostOf(u) !== 'antigravity') {
     return '还没有数据。在 Claude 的 Code 标签页里发一条消息，额度就会出现在这里。'
   }
+  if (u?.quotaStatus === 'not-running') {
+    return '未检测到正在运行的反重力。启动反重力后会自动读取每周限额和 5 小时限额。'
+  }
   if (u?.quotaStatus === 'missing-cli') {
-    return '未检测到 antigravity-usage。运行 npm i -g antigravity-usage，或在右键菜单配置外部命令 / 写入 usage.json。'
+    return '未检测到反重力本地额度接口，也没有可用的外部命令。请先启动反重力，或在右键菜单查看说明。'
   }
   if (u?.quotaStatus === 'needs-login') {
     return '需要登录一次 Google 账号以读取反重力额度：右键点击鲸鱼，选择「登录 Google 账号，读取反重力额度…」。'
@@ -139,7 +142,7 @@ function emptyMessageFor(u) {
   if (u?.quotaStatus === 'error') {
     return `读取 Antigravity 额度失败：${u.quotaError || '请查看日志'}`
   }
-  return '还没有 Antigravity 额度数据。安装 antigravity-usage 或写入 ~/.gemini/antigravity/whale/usage.json 后会显示在这里。'
+  return '还没有 Antigravity 额度数据。启动反重力后会自动读取，也可以写入 ~/.gemini/antigravity/whale/usage.json。'
 }
 
 function renderClaude() {

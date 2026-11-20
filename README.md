@@ -89,9 +89,9 @@ git config --global http.https://github.com.proxy http://127.0.0.1:7890
 #### 在 Antigravity（反重力）中使用
 
 1. **自动跟随与切换**：直接运行 Whale Usage，默认「跟随：自动」——Claude 在前台就贴 Claude 并显示 Claude 额度，Antigravity 2.0 在前台就自动切到 Antigravity 窗口、独立位置锚点和 Antigravity 分组额度。
-2. **接入实时额度**（二选一，也可并用）：
-   - **外部额度命令（默认）**：安装开源 CLI `npm i -g antigravity-usage`，Whale Usage 会定时执行 `antigravity-usage quota --json`（并在每轮结束后立即刷新），自动把各模型池的剩余比例换算为「已用 %」并按当前模型切换显示。命令和刷新间隔可在 `%APPDATA%\Whale Usage\settings.json` 里修改 `antigravityQuotaCommand` / `antigravityQuotaIntervalSec`。
-   - **标准本地 JSON 协议**：也可以由你自己的脚本直接写入 `~/.gemini/antigravity/whale/usage.json`：
+2. **接入实时额度**（自动，无需安装）：
+   - **反重力本地接口（默认，推荐）**：Whale Usage 直接读取 Antigravity 2.0 自带 `language_server.exe` 的本地额度 RPC，自动从进程命令行取得 CSRF token、枚举监听端口并只接受返回 200 的有效端口（跳过 401 端口），读取「每周限额 + 5 小时限额」以及 Gemini / Claude / Argon 分组。无需安装 `antigravity-usage`，也无需登录 Google。刷新间隔可在 `%APPDATA%\Whale Usage\settings.json` 里修改 `antigravityQuotaIntervalSec`。
+   - **外部命令 / 标准本地 JSON（可选兜底）**：仍可安装 `npm i -g antigravity-usage` 作为兜底（`antigravityQuotaCommand` 可改），或由你自己的脚本直接写入 `~/.gemini/antigravity/whale/usage.json`：
 
      ```json
      {
@@ -178,7 +178,7 @@ Both need plugin 0.2.0 or later; if you installed the plugin before, update `wha
 ### How it works
 
 - `plugin/`: after each Claude Code response, the plugin writes the reported rate-limit usage to `~/.claude/whale/usage.json`, and whether each session is waiting for you and how much its last turn used to `~/.claude/whale/sessions/<session id>.json`, through the official plugin API, without reading any credentials or recording the conversation.
-- `antigravity-plugin/`: native Antigravity lifecycle hooks plugin (`plugin.json` + `hooks.json`). Copy it to `~/.gemini/config/plugins/whale-usage-antigravity/` to sync the active `modelName`, waiting prompts (`ask_question`), and finished turns into `~/.gemini/antigravity/whale/`. For live quotas, install `npm i -g antigravity-usage` (polled via `antigravity-usage quota --json`, configurable via `antigravityQuotaCommand`) or write standard multi-group JSON to `~/.gemini/antigravity/whale/usage.json`.
+- `antigravity-plugin/`: native Antigravity lifecycle hooks plugin (`plugin.json` + `hooks.json`). Copy it to `~/.gemini/config/plugins/whale-usage-antigravity/` to sync the active `modelName`, waiting prompts (`ask_question`), and finished turns into `~/.gemini/antigravity/whale/`. For live quotas, the app reads Antigravity 2.0's own `language_server.exe` RPC directly (weekly + 5-hour pools, no CLI or Google login needed); `antigravity-usage` and standard multi-group JSON at `~/.gemini/antigravity/whale/usage.json` remain optional fallbacks.
 - `src/`: the Electron app follows whichever of Claude or Antigravity 2.0 is in front (or lock to one in the menu), sits on the input box, reads Antigravity's active model label, and switches quota groups accordingly.
 - The run log is at `%APPDATA%\Whale Usage\logs\main.log` (menu: 打开日志文件夹). Attach it when reporting a problem.
 - Right-click the character or the tray icon for the menu, styled like the Windows tray menu of [Claude Auto Pass](https://github.com/tiger-git2022/claude-auto-pass): Windows 11 acrylic, rounded corners, Fluent icons, light or dark with Windows.
