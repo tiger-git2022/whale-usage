@@ -24,7 +24,8 @@ const LIMIT_BANNER = /每周.{0,12}限额|weekly.{0,24}limit/i
 const isLimitBanner = text => LIMIT_BANNER.test(text)
 
 // Model selector button/label patterns near Antigravity's composer (no single quotes).
-const MODEL_LABEL = /\b(?:gemini|claude|gpt|sonnet|opus|haiku|orchestrator|o[134])(?:[\w.\-/+\s()高中低]*[\w)高中低])?/i
+// Require a real model family/version after Gemini/Claude so workspace names like "Claude Whale" never match.
+const MODEL_LABEL = /\b(?:gemini\s+(?:\d|pro|flash|ultra|nano)[\w.\-/+\s()高中低]*|claude\s+(?:opus|sonnet|haiku|\d)[\w.\-/+\s()高中低]*|orchestrator\s*\([\w.\-/+\s()高中低]+\)|gpt(?:-[\w.\-]+)+[\w.\-/+\s()高中低]*)/i
 const MENU_BADGE = /新建|通知|不可用|unavailable|disabled|查看用量|view usage/i
 
 function isModelLabel(text) {
@@ -127,10 +128,10 @@ function Climb-AntigravityCard($anchor, $rootRect, $requireBigger) {
     if (-not $cur) { break }
     $c = $cur.Current
     $r = $c.BoundingRectangle
-    if ($r.IsEmpty -or $r.Width -gt $rootRect.Width * 0.95 -or $r.Height -gt $rootRect.Height * 0.55) { break }
-    if ($r.Width -lt 240 -or $r.Height -lt 48) { continue }
+    if ($r.IsEmpty -or $r.Width -gt $rootRect.Width * 0.95 -or $r.Height -gt $rootRect.Height * 0.45) { break }
+    if ($r.Width -lt 360 -or $r.Height -lt 48 -or $r.Height -gt 260) { continue }
     if ($c.ClassName -match '(^|\s)rounded|composer|prompt|chat-input|input-box' -and $r.Height -ge $anchorHeight + 8) { return $cur }
-    if (-not $fallback -and $r.Height -ge [Math]::Max($anchorHeight + 16, 56) -and $r.Height -le [Math]::Min($anchorHeight + 180, $rootRect.Height * 0.45)) {
+    if (-not $fallback -and $r.Height -ge [Math]::Max($anchorHeight + 16, 56) -and $r.Height -le [Math]::Min($anchorHeight + 160, 240)) {
       $fallback = $cur
     }
   }
@@ -207,7 +208,7 @@ function Find-AntigravityBox($hwnd) {
       if ($c.IsOffscreen -or $r.IsEmpty -or $r.Top -lt $minTop) { continue }
       $ct = $c.ControlType.ProgrammaticName -replace '^ControlType\.', ''
       if ($ct -in @('Edit','Document','Button','ComboBox','Text','Group')) {
-        $nm = ([string]$c.Name).Replace([char]13,'').Replace([char]10,'')
+        $nm = ([string]$c.Name) -replace '[\r\n]+', ' '
         if ($nm.Length -gt 24) { $nm = $nm.Substring(0, 24) }
         $cn = ([string]$c.ClassName)
         if ($cn.Length -gt 24) { $cn = $cn.Substring(0, 24) }
@@ -273,7 +274,6 @@ function Find-AntigravityUsageTexts($hwnd) {
   $anchor = $null
   foreach ($t in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCond)) {
     $c = $t.Current
-    if ($c.IsOffscreen) { continue }
     $nm = ([string]$c.Name).Trim()
     if ($nm -eq '使用情况' -or $nm -eq 'Usage') {
       $anchor = $t
@@ -293,13 +293,14 @@ function Find-AntigravityUsageTexts($hwnd) {
     $panel = $p
   }
   $items = @()
+  $idx = 0
   foreach ($t in $panel.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textCond)) {
     $c = $t.Current
     $r = $c.BoundingRectangle
-    if ($c.IsOffscreen -or $r.IsEmpty) { continue }
     $nm = ([string]$c.Name).Trim()
     if ($nm.Length -gt 0 -and $nm.Length -le 80) {
-      $key = ([int]($r.Top / 6)) * 10000 + [int]$r.Left
+      $idx += 1
+      $key = if (-not $r.IsEmpty) { ([int]($r.Top / 6)) * 10000 + [int]$r.Left } else { $idx }
       $items += [PSCustomObject]@{ Key = $key; Text = $nm }
     }
   }

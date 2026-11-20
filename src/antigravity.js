@@ -796,8 +796,9 @@ function runOnce({ force = false } = {}) {
     try {
       const parsed = parseJsonStdout(stdout)
       const normalized = normalizeUsage(parsed, Date.now())
-      if (!normalized) throw new Error('命令输出里没有可识别的额度字段')
-      latestCli = normalized
+      if (normalized) {
+        latestCli = normalized
+      }
       status = 'ok'
       lastError = null
       onChange()

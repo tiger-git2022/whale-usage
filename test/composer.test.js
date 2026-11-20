@@ -42,6 +42,7 @@ test('isModelLabel and extractModelLabel recognize Antigravity model picker labe
   assert.strictEqual(extractModelLabel('GPT-OSS 120B'), 'GPT-OSS 120B')
   assert.ok(!isModelLabel('Gemini 4 Neon 中 新建'))
   assert.ok(!isModelLabel('Gemini 4 Carbon 不可用'))
+  assert.ok(!isModelLabel('Claude Whale'))
   assert.ok(!isModelLabel('https://antigravity.google/docs/gemini'))
   assert.ok(!isModelLabel('这是一段很长的聊天消息内容，提到了 Gemini 和 Claude 但是绝对不应该被误认为模型选择器按钮名称'))
   assert.ok(!isModelLabel('line1\nGemini 2.5 Pro'))
