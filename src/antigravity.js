@@ -9,7 +9,7 @@
 //   - UI Automation text near Antigravity's input box (instant, even before sending a message)
 //   - ~/.gemini/antigravity/whale/state.json written by the official Antigravity hooks plugin
 
-const { exec, execFile } = require('child_process')
+const { exec, execFile, spawn } = require('child_process')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
@@ -98,7 +98,7 @@ function classifyModel(name) {
   if (/\b(gpt|openai|o1|o3|o4|codex)\b/.test(text) || text.includes('gpt-')) return 'gpt'
   if (text.includes('gemini')) {
     if (/\b(flash|lite|nano)\b/.test(text) || text.includes('flash')) return 'gemini_flash'
-    if (/\b(pro|ultra|high|neon|next|thinking|preview|2\.5|3|4)\b/.test(text)) return 'gemini_pro'
+    if (/\b(pro|ultra|high|neon|argon|next|thinking|preview|2\.5|3|4)\b/.test(text)) return 'gemini_pro'
     return 'gemini'
   }
   if (/\b(flash|lite)\b/.test(text)) return 'gemini_flash'
@@ -448,30 +448,83 @@ function scheduleNext(delay) {
   timer = setTimeout(() => runOnce(), delay)
 }
 
-function runAntigravityCli(args, timeoutMs, callback) {
-  const entry = findAntigravityUsageEntry()
-  const opts = { windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024 }
-  if (entry && process.versions.electron) {
-    execFile(process.execPath, [entry, ...args], { ...opts, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }, callback)
-    return
-  }
-  exec(['antigravity-usage', ...args].join(' '), opts, callback)
-}
-
-// Opens the browser via `antigravity-usage login` (using Electron's bundled Node) and refreshes quota on success.
-function login() {
+// Opens the browser via `antigravity-usage login --no-browser` (using Electron's bundled Node and
+// shell.openExternal so it never fails under restricted PowerShell policies) and refreshes quota on success.
+function login(openUrl) {
   if (loggingIn) return
   loggingIn = true
   status = 'logging-in'
   lastError = null
   onChange()
   log.info('starting antigravity-usage login')
-  runAntigravityCli(['login'], 5 * 60 * 1000, (err, stdout, stderr) => {
+
+  const entry = findAntigravityUsageEntry()
+  let child
+  if (entry && process.versions.electron) {
+    let pre = null
+    try {
+      pre = electronPreload()
+    } catch (err) {
+      log.warn('could not write antigravity-usage preload', err.message)
+    }
+    const args = pre ? ['-r', pre, entry, 'login', '--no-browser'] : [entry, 'login', '--no-browser']
+    child = spawn(process.execPath, args, {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    })
+  } else {
+    child = spawn('antigravity-usage', ['login', '--no-browser'], {
+      windowsHide: true,
+      shell: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  }
+
+  let opened = false
+  let outBuf = ''
+  let errBuf = ''
+  const killTimer = setTimeout(() => {
+    try {
+      child.kill()
+    } catch {}
+  }, 5 * 60 * 1000)
+
+  const checkUrl = text => {
+    if (opened) return
+    const m = text.match(/https:\/\/accounts\.google\.com\/o\/oauth2\/\S+/)
+    if (m) {
+      opened = true
+      log.info('opening Google OAuth URL in default browser')
+      if (typeof openUrl === 'function') openUrl(m[0])
+    }
+  }
+
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', chunk => {
+    outBuf += chunk
+    checkUrl(outBuf)
+  })
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', chunk => {
+    errBuf += chunk
+    checkUrl(errBuf)
+  })
+  child.on('error', err => {
+    clearTimeout(killTimer)
     loggingIn = false
-    if (err) {
-      const msg = (stderr || stdout || err.message || 'login failed').trim().slice(0, 180)
+    log.warn('antigravity-usage login spawn failed:', err.message)
+    status = isCommandNotFound(err, errBuf) ? 'missing-cli' : 'error'
+    lastError = err.message
+    onChange()
+  })
+  child.on('close', code => {
+    clearTimeout(killTimer)
+    loggingIn = false
+    if (code !== 0) {
+      const msg = (errBuf || outBuf || `exit ${code}`).trim().slice(0, 180)
       log.warn('antigravity-usage login failed:', msg)
-      status = isCommandNotFound(err, stderr) ? 'missing-cli' : 'error'
+      status = isCommandNotFound(null, msg) ? 'missing-cli' : 'error'
       lastError = msg
       onChange()
       return
@@ -520,24 +573,40 @@ function splitCommandArgs(cmd) {
   return tokens
 }
 
+// Under Electron's Node (ELECTRON_RUN_AS_NODE), commander sees process.versions.electron and treats
+// the CLI as a packaged Electron app, dropping the first argument (so `login`, `--json` were ignored).
+// This preload marks it as a default app, so arguments are read like plain Node.
+let preloadPath = null
+function electronPreload() {
+  if (preloadPath && fs.existsSync(preloadPath)) return preloadPath
+  const file = path.join(os.tmpdir(), 'whale-usage-ag-preload.cjs')
+  fs.writeFileSync(file, 'process.defaultApp = true\n')
+  preloadPath = file
+  return file
+}
+
+function runAntigravityCli(args, timeoutMs, callback) {
+  const entry = findAntigravityUsageEntry()
+  const opts = { windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024 }
+  if (entry && process.versions.electron) {
+    let pre = null
+    try {
+      pre = electronPreload()
+    } catch (err) {
+      log.warn('could not write antigravity-usage preload', err.message)
+    }
+    const nodeArgs = pre ? ['-r', pre, entry, ...args] : [entry, ...args]
+    execFile(process.execPath, nodeArgs, { ...opts, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }, callback)
+    return
+  }
+  exec(['antigravity-usage', ...args].join(' '), opts, callback)
+}
+
 function executeQuotaCommand(cmd, callback) {
   const tokens = splitCommandArgs(cmd)
   if (tokens.length > 0 && /^antigravity-usage(?:\.cmd|\.exe)?$/i.test(tokens[0])) {
-    const entry = findAntigravityUsageEntry()
-    if (entry && process.versions.electron) {
-      execFile(
-        process.execPath,
-        [entry, ...tokens.slice(1)],
-        {
-          windowsHide: true,
-          timeout: CMD_TIMEOUT_MS,
-          maxBuffer: 1024 * 1024,
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-        },
-        callback,
-      )
-      return
-    }
+    runAntigravityCli(tokens.slice(1), CMD_TIMEOUT_MS, callback)
+    return
   }
   exec(cmd, { windowsHide: true, timeout: CMD_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, callback)
 }
