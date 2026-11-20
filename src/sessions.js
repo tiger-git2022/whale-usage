@@ -54,25 +54,33 @@ function track(tracker, sessions, now = Date.now()) {
   const active = []
   const newWaits = []
   const newTurns = []
+  const completedTurns = []
   const openKeys = new Set()
   for (const s of sessions) {
+    const host = s.host || 'claude'
     if (s.wait && now - (s.updatedAt || 0) < WAIT_STALE_MS) {
-      const key = `${s.id}:${s.wait.since}`
-      const wait = { ...s.wait, session: s.id }
+      const key = `${host}:${s.id}:${s.wait.since}`
+      const wait = { ...s.wait, session: s.id, host }
       openKeys.add(key)
       active.push(wait)
       if (tracker.primed && !tracker.waits.has(key)) newWaits.push(wait)
     }
-    if (s.turn && tracker.turns.get(s.id) !== s.turn.id) {
-      tracker.turns.set(s.id, s.turn.id)
-      const moved = Object.values(s.turn.deltas || {}).some(d => d > 0)
-      if (tracker.primed && moved && now - s.turn.at < TURN_FRESH_MS) newTurns.push({ ...s.turn, session: s.id })
+    const turnKey = `${host}:${s.id}`
+    if (s.turn && tracker.turns.get(turnKey) !== s.turn.id) {
+      tracker.turns.set(turnKey, s.turn.id)
+      const fresh = tracker.primed && now - s.turn.at < TURN_FRESH_MS
+      if (fresh) {
+        const turn = { ...s.turn, session: s.id, host }
+        completedTurns.push(turn)
+        const moved = Object.values(s.turn.deltas || {}).some(d => d > 0)
+        if (moved) newTurns.push(turn)
+      }
     }
   }
   tracker.waits = openKeys
   tracker.primed = true
   active.sort((a, b) => a.since - b.since)
-  return { active, newWaits, newTurns }
+  return { active, newWaits, newTurns, completedTurns }
 }
 
 module.exports = { read, removeOld, createTracker, track }

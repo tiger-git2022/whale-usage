@@ -1,13 +1,24 @@
 const pet = document.getElementById('pet')
 const avatar = document.getElementById('avatar')
 const bubble = document.getElementById('bubble')
+const bubbleTitle = document.getElementById('bubble-title')
+const modelBar = document.getElementById('model-bar')
 const rows = document.getElementById('rows')
 const empty = document.getElementById('empty')
 const updated = document.getElementById('updated')
 const note = document.getElementById('note')
+const badges = document.getElementById('badges')
 
-const LABELS = { five_hour: '5 小时', seven_day: '本周', spend_limit: '消费上限' }
-const ORDER = ['five_hour', 'seven_day', 'spend_limit']
+const LABELS = { five_hour: '5 小时', seven_day: '本周', spend_limit: '消费上限', quota: '周期额度' }
+const ORDER = ['five_hour', 'seven_day', 'spend_limit', 'quota']
+const GROUP_SHORT = {
+  gemini_pro: { label: 'Pro', color: 'gemini' },
+  gemini_flash: { label: 'Flash', color: 'flash' },
+  gemini: { label: 'Gem', color: 'gemini' },
+  claude: { label: 'Cla', color: 'claude' },
+  gpt: { label: 'GPT', color: 'gpt' },
+  third_party: { label: '3P', color: 'claude' },
+}
 const ALERT_AT = [80, 95]
 const AUTO_HIDE_MS = 7000
 const TURN_NOTE_MS = 20000 // how long a finished-turn note stays; the pointer on it holds it
@@ -18,6 +29,7 @@ let pinned = false
 let hideTimer = null
 let shownPercent = {} // what each row currently displays, for the rolling animation
 let lastAlertLevel = {}
+let initializedHosts = new Set()
 
 // ---------- numbers ----------
 
@@ -68,51 +80,168 @@ function rollTo(el, key, target) {
 
 // ---------- drawing ----------
 
-function sortedLimits() {
-  if (!usage || !Array.isArray(usage.limits)) return []
-  return [...usage.limits].sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind))
+function hostOf(u) {
+  return u?.host === 'antigravity' ? 'antigravity' : 'claude'
 }
 
-function render() {
-  const limits = sortedLimits()
+function sortedLimits(list) {
+  if (!Array.isArray(list)) return []
+  return [...list].sort((a, b) => {
+    const ai = ORDER.indexOf(a.kind)
+    const bi = ORDER.indexOf(b.kind)
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
+  })
+}
+
+function createRowElement(key, limit, color) {
+  const row = document.createElement('div')
+  row.className = 'row'
+  row.dataset.key = key
+  row.dataset.kind = limit.kind
+  if (color) row.dataset.color = color
+  row.innerHTML = `
+    <div class="row-top"><span class="name"></span><b class="pct">0%</b></div>
+    <div class="bar"><i></i></div>
+    <div class="muted reset"></div>`
+  return row
+}
+
+function updateRowElement(row, key, limit, labelOverride) {
+  const percent = Math.round(effectivePercent(limit))
+  row.querySelector('.name').textContent = labelOverride || limit.label || LABELS[limit.kind] || limit.kind
+  const fill = row.querySelector('.bar i')
+  fill.style.width = `${Math.min(100, percent)}%`
+  fill.className = level(percent)
+  row.querySelector('.reset').textContent = resetText(limit)
+  const pctEl = row.querySelector('.pct')
+  if (shownPercent[key] !== percent) rollTo(pctEl, key, percent)
+  else pctEl.textContent = `${percent}%`
+}
+
+function emptyMessageFor(u) {
+  if (hostOf(u) !== 'antigravity') {
+    return '还没有数据。在 Claude 的 Code 标签页里发一条消息，额度就会出现在这里。'
+  }
+  if (u?.quotaStatus === 'missing-cli') {
+    return '未检测到 antigravity-usage。运行 npm i -g antigravity-usage，或在右键菜单配置外部命令 / 写入 usage.json。'
+  }
+  if (u?.quotaStatus === 'error') {
+    return `读取 Antigravity 额度失败：${u.quotaError || '请查看日志'}`
+  }
+  return '还没有 Antigravity 额度数据。安装 antigravity-usage 或写入 ~/.gemini/antigravity/whale/usage.json 后会显示在这里。'
+}
+
+function renderClaude() {
+  const limits = sortedLimits(usage?.limits)
+  bubbleTitle.textContent = 'Claude 额度'
+  modelBar.classList.add('hidden')
+  empty.textContent = emptyMessageFor(usage)
   empty.classList.toggle('hidden', limits.length > 0)
   updated.textContent = usage?.updatedAt ? agoText(usage.updatedAt) : ''
 
+  // Remove any Antigravity group wrappers before updating flat rows
+  for (const g of rows.querySelectorAll('.group')) g.remove()
+
   for (const limit of limits) {
-    let row = rows.querySelector(`[data-kind="${limit.kind}"]`)
+    const key = `claude:${limit.kind}`
+    let row = rows.querySelector(`.row[data-key="${key}"]`)
     if (!row) {
-      row = document.createElement('div')
-      row.className = 'row'
-      row.dataset.kind = limit.kind
-      row.innerHTML = `
-        <div class="row-top"><span class="name"></span><b class="pct">0%</b></div>
-        <div class="bar"><i></i></div>
-        <div class="muted reset"></div>`
+      row = createRowElement(key, limit, null)
       rows.appendChild(row)
     }
-    const percent = Math.round(effectivePercent(limit))
-    row.querySelector('.name').textContent = LABELS[limit.kind] ?? limit.kind
-    const fill = row.querySelector('.bar i')
-    fill.style.width = `${Math.min(100, percent)}%`
-    fill.className = level(percent)
-    row.querySelector('.reset').textContent = resetText(limit)
-    if (shownPercent[limit.kind] !== percent) rollTo(row.querySelector('.pct'), limit.kind, percent)
+    updateRowElement(row, key, limit)
   }
-  for (const row of rows.querySelectorAll('.row')) {
-    if (!limits.some(l => l.kind === row.dataset.kind)) row.remove()
+  for (const row of rows.querySelectorAll(':scope > .row')) {
+    if (!limits.some(l => `claude:${l.kind}` === row.dataset.key)) row.remove()
   }
 
-  for (const pill of document.querySelectorAll('.pill')) {
-    const limit = limits.find(l => l.kind === pill.dataset.kind)
-    if (!limit) {
-      pill.className = 'pill hidden'
-      continue
-    }
+  // Pills under the pet: 5h (blue) + 7d (purple)
+  const pillNodes = []
+  for (const kind of ['five_hour', 'seven_day']) {
+    const limit = limits.find(l => l.kind === kind)
+    if (!limit) continue
     const percent = Math.round(effectivePercent(limit))
-    pill.textContent = `${percent}%`
-    pill.title = `${LABELS[limit.kind]}：${percent}%`
+    const pill = document.createElement('span')
+    pill.dataset.kind = kind
     pill.className = `pill ${level(percent)}`
+    pill.textContent = `${percent}%`
+    pill.title = `${LABELS[kind]}：${percent}%`
+    pillNodes.push(pill)
   }
+  badges.replaceChildren(...pillNodes)
+}
+
+function renderAntigravity() {
+  const groups = Array.isArray(usage?.groups) ? usage.groups : []
+  bubbleTitle.textContent = 'Antigravity 额度'
+  updated.textContent = usage?.updatedAt ? agoText(usage.updatedAt) : ''
+
+  if (usage?.activeModel || (usage?.overrideGroup && usage.overrideGroup !== 'auto')) {
+    const parts = []
+    if (usage.activeModel) parts.push(`模型：${usage.activeModel}`)
+    if (usage.overrideGroup && usage.overrideGroup !== 'auto') parts.push(`已固定：${usage.activeGroupLabel || usage.overrideGroup}`)
+    modelBar.textContent = parts.join(' · ')
+    modelBar.title = modelBar.textContent
+    modelBar.classList.remove('hidden')
+  } else {
+    modelBar.classList.add('hidden')
+  }
+
+  empty.textContent = emptyMessageFor(usage)
+  empty.classList.toggle('hidden', groups.length > 0)
+
+  // Rebuild grouped view cleanly (keeps percentage rolling smooth via shownPercent)
+  const groupNodes = []
+  for (const group of groups) {
+    const card = document.createElement('div')
+    card.className = `group${group.active ? ' active' : ''}`
+    card.dataset.group = group.id
+    if (group.color) card.dataset.color = group.color
+
+    const head = document.createElement('div')
+    head.className = 'group-head'
+    const locked = usage?.overrideGroup === group.id
+    head.title = locked ? '点此恢复按模型自动切换' : '点此固定查看该分组额度'
+    head.append(el('span', '', group.label || group.id))
+    if (group.active) {
+      head.append(el('span', 'group-tag', locked ? '已固定' : '当前'))
+    }
+    head.addEventListener('click', e => {
+      e.stopPropagation()
+      window.whale.selectGroup(locked ? 'auto' : group.id)
+    })
+    card.appendChild(head)
+
+    for (const limit of sortedLimits(group.limits)) {
+      const key = `antigravity:${group.id}:${limit.kind}`
+      const row = createRowElement(key, limit, group.color)
+      updateRowElement(row, key, limit)
+      card.appendChild(row)
+    }
+    groupNodes.push(card)
+  }
+  rows.replaceChildren(...groupNodes)
+
+  // Pills under the pet: only the active model's group (up to 2 windows)
+  const activeLimits = sortedLimits(usage?.limits).slice(0, 2)
+  const pillNodes = activeLimits.map((limit, idx) => {
+    const percent = Math.round(effectivePercent(limit))
+    const pill = document.createElement('span')
+    pill.dataset.kind = limit.kind
+    if (limit.color) pill.dataset.color = limit.color
+    pill.className = `pill ${level(percent)}`
+    const prefix = idx === 0 && limit.shortLabel ? `${limit.shortLabel} ` : ''
+    pill.textContent = `${prefix}${percent}%`
+    const winLabel = limit.label || LABELS[limit.kind] || limit.kind
+    pill.title = `${limit.groupLabel || ''} ${winLabel}：${percent}%`.trim()
+    return pill
+  })
+  badges.replaceChildren(...pillNodes)
+}
+
+function render() {
+  if (hostOf(usage) === 'antigravity') renderAntigravity()
+  else renderClaude()
 }
 
 // ---------- bubble ----------
@@ -131,13 +260,36 @@ function hideBubble() {
   pinned = false
 }
 
+function alertEntries(u) {
+  if (!u) return []
+  if (hostOf(u) === 'antigravity') {
+    const out = []
+    for (const g of u.groups || []) {
+      for (const limit of g.limits || []) {
+        out.push({ key: `antigravity:${g.id}:${limit.kind}`, limit })
+      }
+    }
+    return out
+  }
+  return sortedLimits(u.limits).map(limit => ({ key: `claude:${limit.kind}`, limit }))
+}
+
 // Pops the bubble once when a window first crosses 80% or 95%.
 function checkAlerts() {
-  for (const limit of sortedLimits()) {
+  const host = hostOf(usage)
+  const entries = alertEntries(usage)
+  if (!initializedHosts.has(host)) {
+    if (entries.length > 0) initializedHosts.add(host)
+    for (const { key, limit } of entries) {
+      lastAlertLevel[key] = ALERT_AT.filter(a => effectivePercent(limit) >= a).pop() ?? 0
+    }
+    return
+  }
+  for (const { key, limit } of entries) {
     const percent = effectivePercent(limit)
     const reached = ALERT_AT.filter(a => percent >= a).pop() ?? 0
-    const before = lastAlertLevel[limit.kind]
-    lastAlertLevel[limit.kind] = reached
+    const before = lastAlertLevel[key]
+    lastAlertLevel[key] = reached
     if (before !== undefined && reached > before) {
       showBubble()
       bounce()
@@ -251,10 +403,11 @@ function hideNote({ dismiss = false } = {}) {
 }
 
 function waitLines(wait, others) {
+  const name = wait.host === 'antigravity' ? 'Antigravity' : 'Claude'
   const [title, detail] =
-    wait.kind === 'question' ? ['Claude 在等你回答问题', '']
-    : wait.tool === 'ExitPlanMode' ? ['Claude 在等你确认计划', '']
-    : ['Claude 在等你批准', wait.tool ? `要用 ${wait.tool}` : '']
+    wait.kind === 'question' ? [`${name} 在等你回答问题`, '']
+    : wait.tool === 'ExitPlanMode' ? [`${name} 在等你确认计划`, '']
+    : [`${name} 在等你批准`, wait.tool ? `要用 ${wait.tool}` : '']
   const lines = [el('b', '', title)]
   if (detail) lines.push(el('span', 'muted', detail))
   if (others > 0) lines.push(el('span', 'muted', `还有 ${others} 个会话也在等你`))
@@ -269,7 +422,7 @@ function onWaits({ active, fresh }) {
     if (noteKind === 'wait') hideNote()
     return
   }
-  const key = `${wait.session}:${wait.since}`
+  const key = `${wait.host || 'claude'}:${wait.session}:${wait.since}`
   if (fresh) {
     chime('wait')
     bounce()
@@ -283,17 +436,34 @@ function onWaits({ active, fresh }) {
 }
 
 // A finished turn that used at least 1% of a window
-function onTurn(deltas) {
+function onTurn(payload) {
+  const deltas = payload?.deltas ? payload.deltas : payload
+  if (!deltas) return
   chime('done')
   bounce()
   if (noteKind === 'wait') return // the wait matters more
   const children = [el('span', '', '回复完了，这轮用了')]
-  for (const kind of ORDER) {
-    if (!(deltas[kind] > 0)) continue
-    const chip = el('span', 'delta', `+${deltas[kind]}%`)
-    chip.dataset.kind = kind
-    chip.title = LABELS[kind] ?? kind
-    children.push(chip)
+  const entries = Object.entries(deltas).filter(([, v]) => v > 0)
+  entries.sort(([a], [b]) => {
+    const ai = ORDER.indexOf(a.includes(':') ? a.split(':')[1] : a)
+    const bi = ORDER.indexOf(b.includes(':') ? b.split(':')[1] : b)
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
+  })
+  for (const [rawKey, delta] of entries) {
+    if (rawKey.includes(':')) {
+      const [groupId, kind] = rawKey.split(':')
+      const meta = GROUP_SHORT[groupId] || { label: groupId, color: 'gemini' }
+      const chip = el('span', 'delta', `${meta.label} +${delta}%`)
+      chip.dataset.kind = kind
+      chip.dataset.color = meta.color
+      chip.title = `${meta.label} ${LABELS[kind] || kind}`
+      children.push(chip)
+    } else {
+      const chip = el('span', 'delta', `+${delta}%`)
+      chip.dataset.kind = rawKey
+      chip.title = LABELS[rawKey] ?? rawKey
+      children.push(chip)
+    }
   }
   showNote('turn', children, TURN_NOTE_MS)
 }
@@ -336,17 +506,17 @@ pet.addEventListener('pointerup', () => {
   }
 })
 
-// Clicks on transparent parts of the window go through to Claude underneath.
+// Clicks on transparent parts of the window go through to the app underneath.
 let overPet = false
 document.addEventListener('mousemove', e => {
-  const el = document.elementFromPoint(e.clientX, e.clientY)
+  const node = document.elementFromPoint(e.clientX, e.clientY)
   const over = Boolean(
-    el &&
-      (pet.contains(el) ||
-        (!bubble.classList.contains('hidden') && bubble.contains(el)) ||
-        (noteKind && note.contains(el))),
+    node &&
+      (pet.contains(node) ||
+        (!bubble.classList.contains('hidden') && bubble.contains(node)) ||
+        (noteKind && note.contains(node))),
   )
-  holdNote(Boolean(el && noteKind && note.contains(el)))
+  holdNote(Boolean(node && noteKind && note.contains(node)))
   if (over !== overPet || press) {
     overPet = over || Boolean(press)
     window.whale.mouseOverPet(overPet)
@@ -380,17 +550,9 @@ window.whale.onConfig(config => {
   soundOn = config.sound
 })
 
-let firstUsage = true
 window.whale.onUsage(next => {
   usage = next
   render()
-  if (firstUsage) {
-    firstUsage = false
-    for (const limit of sortedLimits()) {
-      lastAlertLevel[limit.kind] = ALERT_AT.filter(a => effectivePercent(limit) >= a).pop() ?? 0
-    }
-    return
-  }
   checkAlerts()
 })
 

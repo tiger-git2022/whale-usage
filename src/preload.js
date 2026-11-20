@@ -5,11 +5,12 @@ contextBridge.exposeInMainWorld('whale', {
   onConfig: fn => ipcRenderer.on('config', (_e, config) => fn(config)),
   onShowBubble: fn => ipcRenderer.on('show-bubble', () => fn()),
   onWaits: fn => ipcRenderer.on('waits', (_e, waits) => fn(waits)),
-  onTurn: fn => ipcRenderer.on('turn', (_e, deltas) => fn(deltas)),
+  onTurn: fn => ipcRenderer.on('turn', (_e, turn) => fn(turn)),
   mouseOverPet: over => ipcRenderer.send('mouse-over-pet', over),
   dragStart: () => ipcRenderer.send('drag-start'),
   dragMove: () => ipcRenderer.send('drag-move'),
   dragEnd: () => ipcRenderer.send('drag-end'),
   resizeStep: direction => ipcRenderer.send('resize-step', direction),
   openMenu: () => ipcRenderer.send('open-menu'),
+  selectGroup: groupId => ipcRenderer.send('select-group', groupId),
 })

@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert')
-const { isLimitBanner, bannerDue } = require('../src/composer')
+const { isLimitBanner, isModelLabel, extractModelLabel, bannerDue } = require('../src/composer')
 
 test('isLimitBanner knows the weekly limit banner in Chinese and English', () => {
   assert.ok(isLimitBanner('即将达到每周使用限额11月8日周日 23:00 重置'))
@@ -31,6 +31,16 @@ test('bannerDue waits for a high weekly figure, spaces checks, and waits for mor
   // Use not known: a half-hour rest instead
   assert.strictEqual(bannerDue({ weeklyPercent: null, dismissed: { at: now - 10 * 60 * 1000, weeklyPercent: 76 }, now }), false)
   assert.strictEqual(bannerDue({ weeklyPercent: null, dismissed: { at: now - 31 * 60 * 1000, weeklyPercent: 76 }, now }), true)
+})
+
+test('isModelLabel and extractModelLabel recognize Antigravity model picker labels', () => {
+  assert.strictEqual(extractModelLabel('Gemini 4 Neon (High)'), 'Gemini 4 Neon (High)')
+  assert.strictEqual(extractModelLabel('Claude Sonnet 4.6'), 'Claude Sonnet 4.6')
+  assert.strictEqual(extractModelLabel('Model: Gemini 2.5 Flash'), 'Gemini 2.5 Flash')
+  assert.strictEqual(extractModelLabel('GPT-OSS 120B'), 'GPT-OSS 120B')
+  assert.ok(!isModelLabel('https://antigravity.google/docs/gemini'))
+  assert.ok(!isModelLabel('这是一段很长的聊天消息内容，提到了 Gemini 和 Claude 但是绝对不应该被误认为模型选择器按钮名称'))
+  assert.ok(!isModelLabel('line1\nGemini 2.5 Pro'))
 })
 
 test('fitToWindow maps a box Windows scaled back onto the real window', () => {
