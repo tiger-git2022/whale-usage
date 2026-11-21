@@ -136,21 +136,25 @@ function Find-ClaudeBox($hwnd) {
 function Climb-AntigravityCard($anchor, $rootRect, $requireBigger) {
   $anchorRect = $anchor.Current.BoundingRectangle
   $anchorHeight = $anchorRect.Height
-  $fallback = if ($requireBigger) { $null } else { $anchor }
+  $minWidth = [Math]::Max(360, $rootRect.Width * 0.25)
+  $maxHeight = [Math]::Min($rootRect.Height * 0.45, 520)
+  $fallback = $null
   $cur = $anchor
-  for ($i = 0; $i -lt 10; $i++) {
+  for ($i = 0; $i -lt 14; $i++) {
     $cur = $walker.GetParent($cur)
     if (-not $cur) { break }
     $c = $cur.Current
     $r = $c.BoundingRectangle
-    if ($r.IsEmpty -or $r.Width -gt $rootRect.Width * 0.95 -or $r.Height -gt $rootRect.Height * 0.45) { break }
-    if ($r.Width -lt 360 -or $r.Height -lt 48 -or $r.Height -gt 260) { continue }
+    if ($r.IsEmpty -or $r.Width -gt $rootRect.Width * 0.95 -or $r.Height -gt $rootRect.Height * 0.5) { break }
+    if ($r.Width -lt $minWidth -or $r.Height -lt 48 -or $r.Height -gt $maxHeight) { continue }
     if ($c.ClassName -match '(^|\s)rounded|composer|prompt|chat-input|input-box' -and $r.Height -ge $anchorHeight + 8) { return $cur }
-    if (-not $fallback -and $r.Height -ge [Math]::Max($anchorHeight + 16, 56) -and $r.Height -le [Math]::Min($anchorHeight + 160, 240)) {
+    if (-not $fallback -and $r.Height -ge [Math]::Max($anchorHeight + 16, 56)) {
       $fallback = $cur
     }
   }
-  return $fallback
+  if ($fallback) { return $fallback }
+  if (-not $requireBigger -and $anchorRect.Width -ge $minWidth -and $anchorRect.Height -ge 48) { return $anchor }
+  return $null
 }
 
 function Find-AntigravityBox($hwnd) {
@@ -188,7 +192,10 @@ function Find-AntigravityBox($hwnd) {
       $best = $e
     }
   }
-  if ($best) { return Climb-AntigravityCard $best $rootRect $false }
+  if ($best) {
+    $card = Climb-AntigravityCard $best $rootRect $false
+    if ($card) { return $card }
+  }
 
   # Fallback: anchor on Antigravity 2.0's bottom composer placeholder text or model picker button
   $minTop = $rootRect.Top + $rootRect.Height * 0.48
