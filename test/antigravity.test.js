@@ -16,6 +16,9 @@ const {
   parseQuotaSummary,
   parseUserStatus,
   parseLanguageServerProcesses,
+  parseHubDiscovery,
+  readHubDiscoveryFiles,
+  mergeDiscoveredServers,
   isLoginRequired,
 } = require('../src/antigravity')
 const { handleEvent } = require('../antigravity-plugin/scripts/hook')
@@ -512,6 +515,74 @@ test('parseLanguageServerProcesses reads pid, csrf token and listening ports fro
   )
   assert.deepStrictEqual(parseLanguageServerProcesses('[]'), [])
   assert.deepStrictEqual(parseLanguageServerProcesses('not json'), [])
+  assert.deepStrictEqual(
+    parseLanguageServerProcesses(JSON.stringify([{ pid: 2, token: '', ports: [2557] }]), { requireToken: false }),
+    [{ pid: 2, token: '', ports: [2557] }],
+  )
+})
+
+test('parseHubDiscovery reads Antigravity 2.34 hub discovery files', () => {
+  const token = '11111111-2222-4333-8444-555555555555'
+  assert.deepStrictEqual(
+    parseHubDiscovery(
+      { pid: 39872, httpsPort: 3248, httpPort: 3249, lsVersion: '2.34.0', csrfToken: token },
+      'hub_3249.json',
+    ),
+    { pid: 39872, token, ports: [3248, 3249] },
+  )
+  assert.deepStrictEqual(
+    parseHubDiscovery({ pid: 1, csrf_token: 'abc', https_port: 2556, http_port: 2557 }, 'notes.txt'),
+    { pid: 1, token: 'abc', ports: [2556, 2557] },
+  )
+  assert.strictEqual(parseHubDiscovery({ pid: 0, csrfToken: token, httpPort: 1 }), null)
+  assert.strictEqual(parseHubDiscovery({ pid: 1, csrfToken: '', httpPort: 1 }), null)
+})
+
+test('readHubDiscoveryFiles ignores stale or malformed files and prefers the newest', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-hub-'))
+  const token = '11111111-2222-4333-8444-555555555555'
+  try {
+    const now = Date.now()
+    fs.writeFileSync(
+      path.join(dir, 'hub_3249.json'),
+      JSON.stringify({ pid: process.pid, httpsPort: 3248, httpPort: 3249, csrfToken: token }),
+    )
+    fs.writeFileSync(
+      path.join(dir, 'hub_3248.json'),
+      JSON.stringify({ pid: process.pid, httpPort: 3248, csrfToken: 'older-token' }),
+    )
+    fs.writeFileSync(
+      path.join(dir, 'hub_2557.json'),
+      JSON.stringify({ pid: 2147483647, httpPort: 2557, csrfToken: 'stale-token' }),
+    )
+    fs.writeFileSync(path.join(dir, 'hub_9999.json'), '{broken')
+    fs.writeFileSync(path.join(dir, 'notes.txt'), JSON.stringify({ pid: process.pid, httpPort: 1, csrfToken: 'x' }))
+    fs.utimesSync(path.join(dir, 'hub_3248.json'), new Date(now - 1000), new Date(now - 1000))
+    fs.utimesSync(path.join(dir, 'hub_3249.json'), new Date(now), new Date(now))
+    const found = readHubDiscoveryFiles(dir).map(({ updatedAt, ...entry }) => entry)
+    assert.deepStrictEqual(found, [
+      { pid: process.pid, token, ports: [3248, 3249] },
+      { pid: process.pid, token: 'older-token', ports: [3248] },
+    ])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('mergeDiscoveredServers keeps process ports and takes the hub CSRF token', () => {
+  assert.deepStrictEqual(
+    mergeDiscoveredServers(
+      [
+        { pid: 39872, token: '', ports: [3248, 2040, 3249] },
+        { pid: 1, token: 'legacy', ports: [2557] },
+      ],
+      [{ pid: 39872, token: 'hub-token', ports: [3249, 3248] }],
+    ),
+    [
+      { pid: 39872, token: 'hub-token', ports: [2040, 3248, 3249] },
+      { pid: 1, token: 'legacy', ports: [2557] },
+    ],
+  )
 })
 
 test('pickActiveModel prefers whichever of UIA or hook observed the latest model change', () => {

@@ -4,6 +4,8 @@
 // normalized to percentUsed 0..100 so alerts and colors match the Claude widget):
 //   1. Antigravity 2.0's language_server.exe RPC (RetrieveUserQuotaSummary / GetUserStatus), read
 //      directly from localhost. This is the authoritative source for the weekly + 5-hour pools.
+//      The CSRF token comes from ~/.gemini/antigravity/daemon/hub_<port>.json (2.34+); older builds
+//      still pass --csrf_token on the process command line.
 //   2. ~/.gemini/antigravity/whale/usage.json   standard multi-group usage file (or custom script output)
 //   3. External quota command (default: `antigravity-usage quota --json`) as a fallback
 //
@@ -28,6 +30,7 @@ const LOCAL_DISCOVERY_TIMEOUT_MS = 8 * 1000
 const LOCAL_RPC_TIMEOUT_MS = 1500
 const QUOTA_SUMMARY_PATH = '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary'
 const USER_STATUS_PATH = '/exa.language_server_pb.LanguageServerService/GetUserStatus'
+const HUB_DISCOVERY_FILE_RE = /^hub_\d+\.json$/i
 
 const GROUP_META = {
   gemini: { id: 'gemini', label: 'Gemini 模型', shortLabel: 'Gem', color: 'gemini', order: 0 },
@@ -640,7 +643,8 @@ function parseUserStatus(raw, now = Date.now()) {
   return normalizeUsage({ timestamp: new Date(now).toISOString(), method: 'local', models }, now)
 }
 
-function parseLanguageServerProcesses(stdout) {
+function parseLanguageServerProcesses(stdout, options = {}) {
+  const requireToken = options.requireToken !== false
   const text = String(stdout || '').replace(/^\uFEFF/, '').trim()
   if (!text) return []
   let data
@@ -658,10 +662,92 @@ function parseLanguageServerProcesses(stdout) {
     const ports = Array.isArray(item.ports)
       ? [...new Set(item.ports.map(Number).filter(port => Number.isInteger(port) && port > 0 && port < 65536))]
       : []
-    if (!Number.isInteger(pid) || pid <= 0 || !token) continue
+    if (!Number.isInteger(pid) || pid <= 0) continue
+    if (requireToken && !token) continue
     servers.push({ pid, token, ports })
   }
   return servers
+}
+
+function hubDiscoveryDir() {
+  if (process.env.ANTIGRAVITY_WHALE_HUB_DIR) return process.env.ANTIGRAVITY_WHALE_HUB_DIR
+  return path.join(os.homedir(), '.gemini', 'antigravity', 'daemon')
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return err?.code === 'EPERM'
+  }
+}
+
+// Antigravity 2.34 removed --csrf_token from language_server.exe's command line and instead writes
+// the token plus both ports to ~/.gemini/antigravity/daemon/hub_<httpPort>.json.
+function parseHubDiscovery(raw, fileName = '') {
+  if (!raw || typeof raw !== 'object') return null
+  const pid = Number(raw.pid)
+  const token = String(raw.csrfToken ?? raw.csrf_token ?? raw.token ?? '').trim()
+  const rawPorts = [raw.httpsPort ?? raw.https_port, raw.httpPort ?? raw.http_port]
+  const fileMatch = String(fileName).match(/_(\d+)\.json$/i)
+  if (fileMatch) rawPorts.push(fileMatch[1])
+  const ports = [...new Set(rawPorts.map(Number).filter(port => Number.isInteger(port) && port > 0 && port < 65536))]
+  if (!Number.isInteger(pid) || pid <= 0 || !token || ports.length === 0) return null
+  return { pid, token, ports }
+}
+
+function readHubDiscoveryFiles(dir = hubDiscoveryDir(), options = {}) {
+  const isAlive = typeof options.isAlive === 'function' ? options.isAlive : isProcessAlive
+  let names
+  try {
+    names = fs.readdirSync(dir)
+  } catch {
+    return []
+  }
+  const entries = []
+  for (const name of names) {
+    if (!HUB_DISCOVERY_FILE_RE.test(name)) continue
+    const file = path.join(dir, name)
+    try {
+      const entry = parseHubDiscovery(JSON.parse(fs.readFileSync(file, 'utf8')), name)
+      if (!entry || !isAlive(entry.pid)) continue
+      let updatedAt = 0
+      try {
+        updatedAt = fs.statSync(file).mtimeMs
+      } catch {
+        // keep zero; ordering only prefers the newest token when several instances run
+      }
+      entries.push({ ...entry, updatedAt })
+    } catch {
+      // ignore malformed/stale discovery files
+    }
+  }
+  entries.sort((a, b) => b.updatedAt - a.updatedAt)
+  return entries
+}
+
+function mergeDiscoveredServers(processServers, hubServers) {
+  const byPid = new Map()
+  for (const server of processServers || []) {
+    const pid = Number(server?.pid)
+    if (!Number.isInteger(pid) || pid <= 0) continue
+    const ports = [...new Set((server.ports || []).map(Number).filter(port => Number.isInteger(port) && port > 0 && port < 65536))]
+    byPid.set(pid, { pid, token: String(server.token || ''), ports })
+  }
+  for (const hub of hubServers || []) {
+    const pid = Number(hub?.pid)
+    if (!Number.isInteger(pid) || pid <= 0 || !hub.token) continue
+    const current = byPid.get(pid)
+    const ports = [...new Set((hub.ports || []).map(Number).filter(port => Number.isInteger(port) && port > 0 && port < 65536))]
+    if (current) {
+      current.token = hub.token
+      current.ports = [...new Set([...ports, ...current.ports])].sort((a, b) => a - b)
+    } else {
+      byPid.set(pid, { pid, token: String(hub.token), ports: ports.sort((a, b) => a - b) })
+    }
+  }
+  return [...byPid.values()]
 }
 
 const DISCOVERY_SCRIPT = [
@@ -673,14 +759,12 @@ const DISCOVERY_SCRIPT = [
   "  if ($cmd -match 'antigravity') {",
   "    $token = ''",
   "    if ($cmd -match '--csrf_token(?:=|\\s+)([^\\s]+)') { $token = $Matches[1] }",
-  '    if ($token) {',
-  '      $ports = @()',
-  '      try { $ports = @(Get-NetTCPConnection -State Listen -OwningProcess $proc.ProcessId -ErrorAction Stop | Select-Object -ExpandProperty LocalPort) } catch { $ports = @() }',
-  '      if ($ports.Count -eq 0) {',
-  "        $ports = @(netstat -ano -p tcp | Select-String -Pattern 'LISTENING' | ForEach-Object { $parts = @(($_.Line -split '\\s+') | Where-Object { $_ }); if ($parts.Count -ge 5 -and $parts[-1] -eq [string]$proc.ProcessId) { [int](($parts[1] -split ':')[-1]) } })",
-  '      }',
-  '      $items += [pscustomobject]@{ pid = [int]$proc.ProcessId; token = $token; ports = @($ports | Sort-Object -Unique) }',
+  '    $ports = @()',
+  '    try { $ports = @(Get-NetTCPConnection -State Listen -OwningProcess $proc.ProcessId -ErrorAction Stop | Select-Object -ExpandProperty LocalPort) } catch { $ports = @() }',
+  '    if ($ports.Count -eq 0) {',
+  "      $ports = @(netstat -ano -p tcp | Select-String -Pattern 'LISTENING' | ForEach-Object { $parts = @(($_.Line -split '\\s+') | Where-Object { $_ }); if ($parts.Count -ge 5 -and $parts[-1] -eq [string]$proc.ProcessId) { [int](($parts[1] -split ':')[-1]) } })",
   '    }',
+  '    $items += [pscustomobject]@{ pid = [int]$proc.ProcessId; token = $token; ports = @($ports | Sort-Object -Unique) }',
   '  }',
   '}',
   'ConvertTo-Json -InputObject @($items) -Compress -Depth 4',
@@ -704,9 +788,21 @@ function runPowerShell(script) {
   })
 }
 
-function discoverLanguageServers() {
-  if (process.platform !== 'win32') return Promise.resolve([])
-  return runPowerShell(DISCOVERY_SCRIPT).then(parseLanguageServerProcesses)
+async function discoverLanguageServers() {
+  if (process.platform !== 'win32') return []
+  let psError = null
+  const [processServers, hubServers] = await Promise.all([
+    runPowerShell(DISCOVERY_SCRIPT)
+      .then(stdout => parseLanguageServerProcesses(stdout, { requireToken: false }))
+      .catch(err => {
+        psError = err
+        return []
+      }),
+    Promise.resolve(readHubDiscoveryFiles()),
+  ])
+  const servers = mergeDiscoveredServers(processServers, hubServers)
+  if (servers.length === 0 && psError) throw psError
+  return servers
 }
 
 function requestLocalJson({ port, protocol, token, rpcPath, body = '{}' }) {
@@ -825,11 +921,15 @@ async function readLocalQuota({ now = Date.now() } = {}) {
   if (withPorts.length === 0) {
     return { ok: false, code: 'no-ports', error: '反重力本地服务没有开放端口' }
   }
-  const summary = await fetchQuotaSummary(withPorts, now)
+  const withToken = withPorts.filter(server => server.token)
+  if (withToken.length === 0) {
+    return { ok: false, code: 'no-token', error: '已检测到反重力，但本地额度接口尚未就绪' }
+  }
+  const summary = await fetchQuotaSummary(withToken, now)
   if (summary) {
     return { ok: true, usage: summary.usage, endpoint: summary.endpoint, source: 'quota-summary' }
   }
-  const legacy = await fetchUserStatus(withPorts, now)
+  const legacy = await fetchUserStatus(withToken, now)
   if (legacy) {
     return { ok: true, usage: legacy.usage, endpoint: legacy.endpoint, source: 'user-status' }
   }
@@ -953,7 +1053,8 @@ function settleNativeFailure(nativeResult) {
   const next = nativeUnavailableStatus(nativeResult)
   const message = nativeResult?.error || '读取反重力本地额度失败'
   if (status !== next || lastError !== message) log.warn('antigravity local quota unavailable:', message)
-  finishPoll(next, message, next === 'not-running' ? intervalMs : ERROR_RETRY_MS)
+  const retrySoon = next === 'not-running' || nativeResult?.code === 'no-token'
+  finishPoll(next, message, retrySoon ? intervalMs : ERROR_RETRY_MS)
 }
 
 function applyNativeResult(result) {
@@ -983,7 +1084,7 @@ function fallbackToCommand(nativeResult) {
   // When Antigravity itself is closed, the default CLI would only query Google's old free-tier
   // endpoint and return a fake 100% snapshot, so don't spawn it every minute. A custom command may
   // still fetch quotas remotely, so it keeps running.
-  if (nativeResult?.code === 'not-running' && command === DEFAULT_COMMAND) {
+  if ((nativeResult?.code === 'not-running' || nativeResult?.code === 'no-token') && command === DEFAULT_COMMAND) {
     settleNativeFailure(nativeResult)
     return
   }
@@ -996,7 +1097,12 @@ function fallbackToCommand(nativeResult) {
     }
     if (err) {
       if (isCommandNotFound(err, stderr)) {
-        if (nativeResult?.code === 'not-running' || nativeResult?.code === 'rpc-failed' || nativeResult?.code === 'no-ports') {
+        if (
+          nativeResult?.code === 'not-running' ||
+          nativeResult?.code === 'no-token' ||
+          nativeResult?.code === 'rpc-failed' ||
+          nativeResult?.code === 'no-ports'
+        ) {
           settleNativeFailure(nativeResult)
           return
         }
@@ -1284,6 +1390,9 @@ module.exports = {
   parseQuotaSummary,
   parseUserStatus,
   parseLanguageServerProcesses,
+  parseHubDiscovery,
+  readHubDiscoveryFiles,
+  mergeDiscoveredServers,
   readLocalQuota,
   pickActiveModel,
   buildRendererPayload,
