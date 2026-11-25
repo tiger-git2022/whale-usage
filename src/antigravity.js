@@ -20,12 +20,16 @@ const https = require('https')
 const os = require('os')
 const path = require('path')
 const log = require('./log')
+const context = require('./antigravity-context')
 
 const DEFAULT_COMMAND = 'antigravity-usage quota --json --refresh'
 const DEFAULT_INTERVAL_SEC = 60
 const ERROR_RETRY_MS = 2 * 60 * 1000
 const CMD_TIMEOUT_MS = 15 * 1000
 const REFRESH_COOLDOWN_MS = 5 * 1000
+const CONTEXT_ACTIVE_INTERVAL_MS = 5 * 1000
+const CONTEXT_IDLE_INTERVAL_MS = 30 * 1000
+const CONTEXT_REFRESH_COOLDOWN_MS = 1500
 const LOCAL_DISCOVERY_TIMEOUT_MS = 8 * 1000
 const LOCAL_RPC_TIMEOUT_MS = 1500
 const QUOTA_SUMMARY_PATH = '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary'
@@ -805,7 +809,15 @@ async function discoverLanguageServers() {
   return servers
 }
 
-function requestLocalJson({ port, protocol, token, rpcPath, body = '{}' }) {
+function requestLocalJson({
+  port,
+  protocol,
+  token,
+  rpcPath,
+  body = '{}',
+  timeoutMs = LOCAL_RPC_TIMEOUT_MS,
+  maxBytes = 1024 * 1024,
+}) {
   return new Promise(resolve => {
     let settled = false
     const finish = value => {
@@ -823,7 +835,7 @@ function requestLocalJson({ port, protocol, token, rpcPath, body = '{}' }) {
           path: rpcPath,
           method: 'POST',
           rejectUnauthorized: false,
-          timeout: LOCAL_RPC_TIMEOUT_MS,
+          timeout: timeoutMs,
           headers: {
             'Content-Type': 'application/json',
             Accept: 'application/json',
@@ -837,7 +849,7 @@ function requestLocalJson({ port, protocol, token, rpcPath, body = '{}' }) {
           res.setEncoding('utf8')
           res.on('data', chunk => {
             text += chunk
-            if (text.length > 1024 * 1024) {
+            if (text.length > maxBytes) {
               req.destroy()
               finish(null)
             }
@@ -885,7 +897,9 @@ async function fetchQuotaSummary(servers, now) {
     candidates.map(async candidate => {
       const json = await requestLocalJson({ ...candidate, rpcPath: QUOTA_SUMMARY_PATH })
       const usage = json ? parseQuotaSummary(json, now) : null
-      return usage ? { usage, endpoint: `${candidate.protocol}://127.0.0.1:${candidate.port}` } : null
+      return usage
+        ? { usage, endpoint: `${candidate.protocol}://127.0.0.1:${candidate.port}`, endpointInfo: candidate }
+        : null
     }),
   )
   return results.find(Boolean) || null
@@ -897,7 +911,9 @@ async function fetchUserStatus(servers, now) {
     candidates.map(async candidate => {
       const json = await requestLocalJson({ ...candidate, rpcPath: USER_STATUS_PATH })
       const usage = json ? parseUserStatus(json, now) : null
-      return usage ? { usage, endpoint: `${candidate.protocol}://127.0.0.1:${candidate.port}` } : null
+      return usage
+        ? { usage, endpoint: `${candidate.protocol}://127.0.0.1:${candidate.port}`, endpointInfo: candidate }
+        : null
     }),
   )
   return results.find(Boolean) || null
@@ -927,11 +943,23 @@ async function readLocalQuota({ now = Date.now() } = {}) {
   }
   const summary = await fetchQuotaSummary(withToken, now)
   if (summary) {
-    return { ok: true, usage: summary.usage, endpoint: summary.endpoint, source: 'quota-summary' }
+    return {
+      ok: true,
+      usage: summary.usage,
+      endpoint: summary.endpoint,
+      endpointInfo: summary.endpointInfo,
+      source: 'quota-summary',
+    }
   }
   const legacy = await fetchUserStatus(withToken, now)
   if (legacy) {
-    return { ok: true, usage: legacy.usage, endpoint: legacy.endpoint, source: 'user-status' }
+    return {
+      ok: true,
+      usage: legacy.usage,
+      endpoint: legacy.endpoint,
+      endpointInfo: legacy.endpointInfo,
+      source: 'user-status',
+    }
   }
   return { ok: false, code: 'rpc-failed', error: '反重力本地服务没有返回额度数据（可能版本不兼容）' }
 }
@@ -951,7 +979,18 @@ function pickActiveModel({ uiModel = null, uiModelAt = 0, hookModel = null, hook
 }
 
 // Builds the normalized payload sent to the renderer for Antigravity mode.
-function buildRendererPayload({ usage, activeModel, overrideGroup = 'auto', quotaStatus = 'empty', quotaError = null }) {
+function buildRendererPayload({
+  usage,
+  activeModel,
+  overrideGroup = 'auto',
+  quotaStatus = 'empty',
+  quotaError = null,
+  tasks = null,
+  tasksUpdatedAt = null,
+  pinnedTaskId = null,
+  hookConversationId = null,
+  contextEnabled = true,
+}) {
   const groups = usage?.groups || []
   const chosen = resolveActiveGroup(groups, activeModel || usage?.activeModel || null, overrideGroup)
   const orderedGroups = chosen
@@ -960,10 +999,18 @@ function buildRendererPayload({ usage, activeModel, overrideGroup = 'auto', quot
   const limits = chosen
     ? chosen.limits.map(l => ({ ...l, groupId: chosen.id, groupLabel: chosen.label, shortLabel: chosen.shortLabel, color: chosen.color }))
     : []
+  const rawTasks = contextEnabled && Array.isArray(tasks) ? tasks : []
+  const resolvedTask = contextEnabled ? context.resolveActiveTask(rawTasks, { pinnedTaskId, hookConversationId }) : null
+  const normalizedTasks = rawTasks.map(task => ({
+    ...task,
+    active: Boolean(resolvedTask && task.cascadeId === resolvedTask.cascadeId),
+    pinned: Boolean(pinnedTaskId && task.cascadeId === pinnedTaskId),
+  }))
+  const activeTask = normalizedTasks.find(t => t.active) || null
   return {
     host: 'antigravity',
     hostLabel: 'Antigravity',
-    updatedAt: usage?.updatedAt || null,
+    updatedAt: usage?.updatedAt || tasksUpdatedAt || null,
     activeModel: activeModel || usage?.activeModel || null,
     activeGroup: chosen?.id || null,
     activeGroupLabel: chosen?.label || null,
@@ -972,6 +1019,11 @@ function buildRendererPayload({ usage, activeModel, overrideGroup = 'auto', quot
     quotaError,
     limits,
     groups: orderedGroups,
+    contextEnabled: Boolean(contextEnabled),
+    pinnedTaskId: pinnedTaskId || null,
+    tasks: normalizedTasks,
+    activeTask,
+    tasksUpdatedAt: tasksUpdatedAt || null,
   }
 }
 
@@ -1022,12 +1074,95 @@ let status = 'idle' // 'idle' | 'ok' | 'not-running' | 'missing-cli' | 'needs-lo
 let lastError = null
 let latestQuota = null
 let latestSource = null // 'native' | 'cli' | null
+let latestEndpointInfo = null
 let nativeError = null
 let timer = null
 let running = false
 let loggingIn = false
 let lastRunAt = 0
 let onChange = () => {}
+
+// Per-task context window poller (reads local language_server trajectories & GM metadata).
+const contextReader = context.createContextReader({
+  discoverServers: discoverLanguageServers,
+  requestJson: requestLocalJson,
+  log,
+})
+let contextEnabled = true
+let contextForeground = false
+let contextTimer = null
+let contextRunning = false
+let lastContextRunAt = 0
+let latestTasks = []
+let latestTasksUpdatedAt = null
+let lastTasksSig = ''
+
+function tasksSignature(list) {
+  return (list || [])
+    .map(t => `${t.cascadeId}:${t.stepCount}:${t.status}:${t.contextUsed}:${t.contextLimit}:${t.model}:${t.title}`)
+    .join('|')
+}
+
+function scheduleNextContext(delay) {
+  clearTimeout(contextTimer)
+  if (!contextEnabled) return
+  contextTimer = setTimeout(() => runContextOnce(), delay)
+}
+
+function runContextOnce({ force = false } = {}) {
+  if (!contextEnabled || process.platform !== 'win32') return
+  const now = Date.now()
+  if (contextRunning) return
+  if (!force && now - lastContextRunAt < CONTEXT_REFRESH_COOLDOWN_MS) return
+  contextRunning = true
+  lastContextRunAt = now
+  clearTimeout(contextTimer)
+
+  contextReader
+    .readTasks({ preferredEndpoint: latestEndpointInfo, now })
+    .then(result => {
+      contextRunning = false
+      if (!contextEnabled) return
+      if (result.ok) {
+        if (result.endpoint) latestEndpointInfo = result.endpoint
+        latestTasks = result.tasks
+        latestTasksUpdatedAt = result.updatedAt || Date.now()
+        const sig = tasksSignature(latestTasks)
+        if (sig !== lastTasksSig) {
+          lastTasksSig = sig
+          onChange()
+        }
+      } else if (latestTasks.length > 0) {
+        latestTasks = []
+        latestTasksUpdatedAt = null
+        lastTasksSig = ''
+        onChange()
+      }
+      scheduleNextContext(contextForeground ? CONTEXT_ACTIVE_INTERVAL_MS : CONTEXT_IDLE_INTERVAL_MS)
+    })
+    .catch(err => {
+      contextRunning = false
+      log.warn('antigravity task context poll failed:', err?.message || err)
+      scheduleNextContext(contextForeground ? CONTEXT_ACTIVE_INTERVAL_MS * 2 : CONTEXT_IDLE_INTERVAL_MS)
+    })
+}
+
+function setContextForeground(inFront) {
+  const next = Boolean(inFront)
+  if (next === contextForeground) return
+  contextForeground = next
+  if (!contextEnabled) return
+  if (next) {
+    if (Date.now() - lastContextRunAt >= CONTEXT_REFRESH_COOLDOWN_MS) runContextOnce({ force: true })
+    else scheduleNextContext(CONTEXT_ACTIVE_INTERVAL_MS)
+  } else {
+    scheduleNextContext(CONTEXT_IDLE_INTERVAL_MS)
+  }
+}
+
+async function readLocalTasks(options = {}) {
+  return contextReader.readTasks({ preferredEndpoint: latestEndpointInfo, ...options })
+}
 
 function scheduleNext(delay) {
   clearTimeout(timer)
@@ -1066,6 +1201,10 @@ function applyNativeResult(result) {
   const changedSource = latestSource !== 'native'
   latestQuota = result.usage
   latestSource = 'native'
+  if (result.endpointInfo) {
+    latestEndpointInfo = result.endpointInfo
+    contextReader.setEndpoint(result.endpointInfo)
+  }
   nativeError = null
   if (changedSource) log.info(`antigravity local quota: ${result.endpoint} (${result.source})`)
   finishPoll('ok', null, intervalMs)
@@ -1346,11 +1485,24 @@ function start(changed, options = {}) {
   configure(options, { runImmediately: true })
 }
 
-function configure({ cmd, intervalSec, isEnabled } = {}, { runImmediately = false } = {}) {
+function configure({ cmd, intervalSec, isEnabled, isContextEnabled } = {}, { runImmediately = false } = {}) {
   if (typeof cmd === 'string') command = cmd.trim()
   if (typeof intervalSec === 'number' && intervalSec >= 10) intervalMs = intervalSec * 1000
   if (typeof isEnabled === 'boolean') enabled = isEnabled
+  if (typeof isContextEnabled === 'boolean') contextEnabled = isContextEnabled
   clearTimeout(timer)
+  clearTimeout(contextTimer)
+  if (!contextEnabled) {
+    latestTasks = []
+    latestTasksUpdatedAt = null
+    lastTasksSig = ''
+    contextReader.clearCache()
+    onChange()
+  } else if (runImmediately) {
+    runContextOnce({ force: true })
+  } else {
+    scheduleNextContext(contextForeground ? CONTEXT_ACTIVE_INTERVAL_MS : CONTEXT_IDLE_INTERVAL_MS)
+  }
   if (!enabled) {
     status = 'disabled'
     latestQuota = null
@@ -1367,6 +1519,8 @@ function configure({ cmd, intervalSec, isEnabled } = {}, { runImmediately = fals
 function stop() {
   clearTimeout(timer)
   timer = null
+  clearTimeout(contextTimer)
+  contextTimer = null
 }
 
 module.exports = {
@@ -1394,6 +1548,7 @@ module.exports = {
   readHubDiscoveryFiles,
   mergeDiscoveredServers,
   readLocalQuota,
+  readLocalTasks,
   pickActiveModel,
   buildRendererPayload,
   parseJsonStdout,
@@ -1403,7 +1558,14 @@ module.exports = {
   stop,
   login,
   logout,
-  refreshNow: () => runOnce({ force: true }),
-  state: () => ({ status, error: lastError, command, enabled, source: latestSource, nativeError }),
+  setContextForeground,
+  refreshTasksNow: () => runContextOnce({ force: true }),
+  refreshNow: () => {
+    runOnce({ force: true })
+    runContextOnce({ force: true })
+  },
+  state: () => ({ status, error: lastError, command, enabled, contextEnabled, source: latestSource, nativeError }),
   latest: () => latestQuota,
+  latestTasks: () => ({ tasks: latestTasks, updatedAt: latestTasksUpdatedAt }),
+  context,
 }

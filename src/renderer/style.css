@@ -10,6 +10,8 @@
   --flash: #0ea5a4;
   --claude: #9b6bf2;
   --gpt: #10a37f;
+  --ctx: #0d9488;
+  --run: #16a34a;
   --other: #6b7591;
   --warn: #e39a1c;
   --bad: #e0483e;
@@ -83,6 +85,13 @@ html, body {
   pointer-events: none;
 }
 
+#badges.wide {
+  left: auto;
+  right: 0;
+  transform: none;
+  justify-content: flex-end;
+}
+
 .pill {
   padding: 1px 6px;
   border-radius: 999px;
@@ -97,6 +106,7 @@ html, body {
 }
 
 .pill[data-kind="seven_day"] { background: var(--seven-day); }
+.pill[data-kind="context"] { background: var(--ctx); }
 .pill[data-color="gemini"] { background: var(--gemini); }
 .pill[data-color="flash"] { background: var(--flash); }
 .pill[data-color="claude"] { background: var(--claude); }
@@ -111,8 +121,8 @@ html, body {
   position: absolute;
   right: 10px;
   bottom: calc(var(--pet) + 22px);
-  width: 292px;
-  max-height: 368px;
+  width: 296px;
+  max-height: 428px;
   display: flex;
   flex-direction: column;
   padding: 11px 13px 10px;
@@ -242,6 +252,145 @@ html, body {
 .group .row-label .reset { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .group .row-top b { font-size: 14px; flex-shrink: 0; }
 .group .muted.reset { font-size: 11px; }
+
+/* Antigravity view tabs & per-task context window cards */
+.ag-tabs {
+  display: flex;
+  gap: 3px;
+  padding: 2px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  background: rgba(31, 42, 68, 0.06);
+  flex-shrink: 0;
+}
+.ag-tabs.hidden { display: none; }
+.ag-tab {
+  flex: 1;
+  border: 0;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 140ms ease, color 140ms ease;
+}
+.ag-tab:hover { color: var(--ink); }
+.ag-tab.active {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(20, 30, 60, 0.12);
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 7px 2px 3px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.section-title:first-child { margin-top: 1px; }
+
+.task-card {
+  margin: 4px 0 5px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  border-left: 3px solid transparent;
+  background: rgba(31, 42, 68, 0.03);
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.task-card:hover { background: rgba(31, 42, 68, 0.06); }
+.task-card.active {
+  background: rgba(13, 148, 136, 0.08);
+  border-left-color: var(--ctx);
+}
+.task-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.task-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  flex: 1;
+}
+.task-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(31, 42, 68, 0.25);
+  flex-shrink: 0;
+}
+.task-dot.running {
+  background: var(--run);
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.24);
+}
+.task-dot.waiting { background: var(--warn); }
+.task-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.task-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.task-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(31, 42, 68, 0.09);
+  color: var(--muted);
+}
+.task-card.active .task-tag.primary {
+  background: var(--ctx);
+  color: #fff;
+}
+.task-pct {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.task-card .bar { height: 5px; margin: 4px 0 3px; }
+.task-card .bar i { background: var(--ctx); }
+.task-card .bar i.warn { background: var(--warn); }
+.task-card .bar i.bad { background: var(--bad); }
+.task-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.task-tokens {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.task-sub {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: right;
+}
 
 #empty { margin: 4px 0 2px; line-height: 1.5; }
 
