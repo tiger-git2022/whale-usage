@@ -253,7 +253,8 @@ function renderClaude() {
     pill.title = `${LABELS[kind]}：${percent}%`
     pillNodes.push(pill)
   }
-  badges.classList.remove('wide')
+  badges.classList.remove('stacked')
+  pet.classList.remove('stacked-badges')
   badges.replaceChildren(...pillNodes)
 }
 
@@ -425,9 +426,9 @@ function renderAntigravity() {
   }
   empty.classList.toggle('hidden', !isEmpty)
 
-  // Pills under the pet: active model's quota group (up to 2 windows) + active task's context usage
+  // Pills under the pet: active model's quota group on row 1, active task's context on row 2
   const activeLimits = sortedLimits(usage?.limits).slice(0, 2)
-  const pillNodes = activeLimits.map((limit, idx) => {
+  const quotaPills = activeLimits.map((limit, idx) => {
     const percent = Math.round(effectivePercent(limit))
     const pill = document.createElement('span')
     pill.dataset.kind = limit.kind
@@ -441,18 +442,30 @@ function renderAntigravity() {
   })
 
   const activeTask = contextEnabled ? usage?.activeTask : null
+  let contextPill = null
   if (activeTask && activeTask.hasContext) {
     const pct = Math.round(activeTask.usagePercent || 0)
     const pill = document.createElement('span')
     pill.dataset.kind = 'context'
     pill.className = `pill ${level(pct)}`
-    pill.textContent = `Ctx ${pct}%`
+    pill.textContent = `上下文 ${pct}%`
     pill.title = taskTooltip(activeTask)
-    pillNodes.push(pill)
+    contextPill = pill
   }
 
-  badges.classList.toggle('wide', pillNodes.length >= 3)
-  badges.replaceChildren(...pillNodes)
+  if (quotaPills.length > 0 && contextPill) {
+    const quotaRow = el('div', 'badge-row')
+    quotaRow.append(...quotaPills)
+    const ctxRow = el('div', 'badge-row')
+    ctxRow.append(contextPill)
+    badges.classList.add('stacked')
+    pet.classList.add('stacked-badges')
+    badges.replaceChildren(quotaRow, ctxRow)
+  } else {
+    badges.classList.remove('stacked')
+    pet.classList.remove('stacked-badges')
+    badges.replaceChildren(...quotaPills, ...(contextPill ? [contextPill] : []))
+  }
 }
 
 function render() {

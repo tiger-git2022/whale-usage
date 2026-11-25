@@ -5,7 +5,7 @@
 // /releases/latest/download/update.json, which, unlike api.github.com (60 requests an hour per IP
 // without login), has no request limit; releases without it fall back to the API.
 
-const { app, net } = require('electron')
+const { app, net } = process.versions.electron ? require('electron') : {}
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
