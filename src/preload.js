@@ -13,4 +13,5 @@ contextBridge.exposeInMainWorld('whale', {
   resizeStep: direction => ipcRenderer.send('resize-step', direction),
   openMenu: () => ipcRenderer.send('open-menu'),
   selectGroup: groupId => ipcRenderer.send('select-group', groupId),
+  selectTask: cascadeId => ipcRenderer.send('select-task', cascadeId),
 })

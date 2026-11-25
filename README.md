@@ -17,7 +17,7 @@
 
 贴在 Claude 和 Antigravity（反重力）桌面 App 旁边的小桌宠，实时显示订阅额度：
 - **Claude 模式**：**蓝色**是 5 小时窗口已用百分比，**紫色**是本周窗口已用百分比。
-- **Antigravity 模式**：根据当前选择的模型（Gemini Pro / Gemini Flash / Claude / GPT 等）自动切换对应分组额度，点击气泡可同时查看所有分组并可手动固定分组。
+- **Antigravity 模式**：根据当前选择的模型（Gemini Pro / Gemini Flash / Claude / GPT 等）自动切换对应分组额度，点击气泡可同时查看所有分组并可手动固定分组；同时实时读取每个反重力任务的上下文窗口占用（Token 数、压缩阈值百分比、模型与构成明细），脚下胶囊同步显示当前任务 `Ctx %`，点任务卡片可固定追踪。
 
 统一以「已用 %」展示，用到 70% 变橙、90% 变红，跨过 80% 和 95% 时自动弹气泡提醒。点一下形象可以看进度条和重置倒计时。
 
@@ -89,8 +89,8 @@ git config --global http.https://github.com.proxy http://127.0.0.1:7890
 #### 在 Antigravity（反重力）中使用
 
 1. **自动跟随与切换**：直接运行 Whale Usage，默认「跟随：自动」——Claude 在前台就贴 Claude 并显示 Claude 额度，Antigravity 2.0 在前台就自动切到 Antigravity 窗口、独立位置锚点和 Antigravity 分组额度。
-2. **接入实时额度**（自动，无需安装）：
-   - **反重力本地接口（默认，推荐）**：Whale Usage 直接读取 Antigravity 2.0 自带 `language_server.exe` 的本地额度 RPC，自动从 `~/.gemini/antigravity/daemon/hub_<端口>.json` 读取 CSRF token（旧版回退到进程命令行）、枚举监听端口并只接受返回 200 的有效端口（跳过 401 端口），读取「每周限额 + 5 小时限额」以及 Gemini / Claude / Argon 分组。无需安装 `antigravity-usage`，也无需登录 Google。刷新间隔可在 `%APPDATA%\Whale Usage\settings.json` 里修改 `antigravityQuotaIntervalSec`。
+2. **接入实时额度与任务上下文**（自动，无需安装）：
+   - **反重力本地接口（默认，推荐）**：Whale Usage 直接读取 Antigravity 2.0 自带 `language_server.exe` 的本地 RPC，自动从 `~/.gemini/antigravity/daemon/hub_<端口>.json` 读取 CSRF token（旧版回退到进程命令行）、枚举监听端口并只接受返回 200 的有效端口（跳过 401 端口），读取「每周限额 + 5 小时限额」（Gemini / Claude / Argon 分组）以及每个任务的实时上下文窗口占用（支持在气泡顶部切换「全部 / 额度 / 上下文」，点击任务可固定追踪，右键菜单可随时开关「显示反重力任务上下文」）。无需安装 `antigravity-usage`，也无需登录 Google。刷新间隔可在 `%APPDATA%\Whale Usage\settings.json` 里修改 `antigravityQuotaIntervalSec`。
    - **外部命令 / 标准本地 JSON（可选兜底）**：仍可安装 `npm i -g antigravity-usage` 作为兜底（`antigravityQuotaCommand` 可改），或由你自己的脚本直接写入 `~/.gemini/antigravity/whale/usage.json`：
 
      ```json
@@ -178,7 +178,7 @@ Both need plugin 0.2.0 or later; if you installed the plugin before, update `wha
 ### How it works
 
 - `plugin/`: after each Claude Code response, the plugin writes the reported rate-limit usage to `~/.claude/whale/usage.json`, and whether each session is waiting for you and how much its last turn used to `~/.claude/whale/sessions/<session id>.json`, through the official plugin API, without reading any credentials or recording the conversation.
-- `antigravity-plugin/`: native Antigravity lifecycle hooks plugin (`plugin.json` + `hooks.json`). Copy it to `~/.gemini/config/plugins/whale-usage-antigravity/` to sync the active `modelName`, waiting prompts (`ask_question`), and finished turns into `~/.gemini/antigravity/whale/`. For live quotas, the app reads Antigravity 2.0's own `language_server.exe` RPC directly (weekly + 5-hour pools, reading the CSRF token from Antigravity's `hub_<port>.json` discovery file; no CLI or Google login needed); `antigravity-usage` and standard multi-group JSON at `~/.gemini/antigravity/whale/usage.json` remain optional fallbacks.
+- `antigravity-plugin/`: native Antigravity lifecycle hooks plugin (`plugin.json` + `hooks.json`). Copy it to `~/.gemini/config/plugins/whale-usage-antigravity/` to sync the active `modelName`, waiting prompts (`ask_question`), and finished turns into `~/.gemini/antigravity/whale/`. For live quotas and per-task context windows, the app reads Antigravity 2.0's own `language_server.exe` RPC directly (weekly + 5-hour pools and per-trajectory context usage/limits via `hub_<port>.json`; no CLI or Google login needed); `antigravity-usage` and standard multi-group JSON at `~/.gemini/antigravity/whale/usage.json` remain optional fallbacks.
 - `src/`: the Electron app follows whichever of Claude or Antigravity 2.0 is in front (or lock to one in the menu), sits on the input box, reads Antigravity's active model label, and switches quota groups accordingly.
 - The run log is at `%APPDATA%\Whale Usage\logs\main.log` (menu: 打开日志文件夹). Attach it when reporting a problem.
 - Right-click the character or the tray icon for the menu, styled like the Windows tray menu of [Claude Auto Pass](https://github.com/tiger-git2022/claude-auto-pass): Windows 11 acrylic, rounded corners, Fluent icons, light or dark with Windows.

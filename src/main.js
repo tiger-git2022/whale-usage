@@ -15,7 +15,7 @@ const { targetState } = require('./win32')
 
 // The widget window at 100% size: the character sits at its bottom-right, the bubble above it.
 // The page is zoomed by settings.scale, so these all scale together.
-const BASE = { w: 320, h: 520, inset: 6, pet: 108 }
+const BASE = { w: 320, h: 580, inset: 6, pet: 108 }
 const SCALE_MIN = 0.4
 const SCALE_MAX = 1.2
 const SIZES = [
@@ -63,6 +63,8 @@ const DEFAULTS = {
   antigravityQuotaCommand: antigravity.DEFAULT_COMMAND,
   antigravityQuotaIntervalSec: antigravity.DEFAULT_INTERVAL_SEC,
   antigravityGroupOverride: 'auto', // 'auto' follows active model, or a specific group id
+  antigravityContextEnabled: true, // show per-task context window usage in Antigravity mode
+  antigravityPinnedTaskId: null, // optional cascadeId pinned by clicking a task card
 }
 
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json')
@@ -220,7 +222,10 @@ function tick() {
     lastUiModel = null
     lastUiModelAt = 0
   }
-  if (!state.window || state.minimized) return setShown(false)
+  if (!state.window || state.minimized) {
+    antigravity.setContextForeground(false)
+    return setShown(false)
+  }
 
   const host = state.window.host
   if (host !== activeHost) setActiveHost(host)
@@ -228,6 +233,7 @@ function tick() {
   const hostRect = toDip(state.rect)
   const inFront = state.hostInFront || state.selfInFront || dragging
   const show = settings.showWhen === 'open' || process.env.WHALE_FORCE_SHOW === '1' ? true : Boolean(inFront)
+  antigravity.setContextForeground(host === 'antigravity' && show)
 
   // Only inspect UIA while the character shows, so a background window is left alone
   const wantBox = settings.snapToBox
@@ -328,12 +334,18 @@ function readAntigravityUsage() {
     usageModel: merged?.activeModel,
   })
   const pollerState = antigravity.state()
+  const taskSnapshot = antigravity.latestTasks()
   const payload = antigravity.buildRendererPayload({
     usage: merged,
     activeModel,
     overrideGroup: settings.antigravityGroupOverride || 'auto',
     quotaStatus: pollerState.status,
     quotaError: pollerState.error,
+    tasks: taskSnapshot.tasks,
+    tasksUpdatedAt: taskSnapshot.updatedAt,
+    pinnedTaskId: settings.antigravityPinnedTaskId || null,
+    hookConversationId: hookState?.conversationId || null,
+    contextEnabled: settings.antigravityContextEnabled !== false,
   })
   lastAntigravityPayload = payload
   return payload
@@ -343,12 +355,17 @@ function readAntigravityUsage() {
 function sendUsage() {
   if (!win || win.isDestroyed()) return
   const payload = activeHost === 'antigravity' ? readAntigravityUsage() : readClaudeUsage()
+  const taskNote =
+    payload.host === 'antigravity' && payload.activeTask && payload.activeTask.hasContext
+      ? ` | ctx:${Math.round(payload.activeTask.usagePercent)}% (${payload.tasks.length} tasks)`
+      : ''
   const summary =
     payload.host === 'antigravity'
       ? `antigravity[${payload.activeModel || 'auto'} -> ${payload.activeGroup || '-'}] ` +
         (payload.groups || [])
           .map(g => `${g.id}:${g.limits.map(l => `${Math.round(l.percentUsed)}%`).join('/')}`)
-          .join(', ')
+          .join(', ') +
+        taskNote
       : `claude ` + (payload.limits || []).map(l => `${l.kind} ${Math.round(l.percentUsed)}%`).join(', ')
   if (summary !== lastUsageText) log.info('usage', summary)
   lastUsageText = summary
@@ -461,6 +478,11 @@ function setAntigravityGroup(groupId) {
   sendUsage()
 }
 
+function setAntigravityTask(cascadeId) {
+  setSetting('antigravityPinnedTaskId', cascadeId || null)
+  sendUsage()
+}
+
 // The right-click menu, for the tray icon and the character. Icons are Segoe Fluent Icons code points.
 function openMenu(at) {
   const autoStart = app.getLoginItemSettings().openAtLogin
@@ -521,7 +543,13 @@ function openMenu(at) {
       : []),
     { type: 'separator' },
     ...(settings.target !== 'antigravity' ? [webUsageEntry()] : []),
-    ...(showAntigravitySection ? [antigravityQuotaEntry(), ...agGroupChips] : []),
+    ...(showAntigravitySection
+      ? [
+          antigravityQuotaEntry(),
+          { type: 'item', id: 'ag:context', icon: 'E8FD', text: '显示反重力任务上下文', checked: settings.antigravityContextEnabled !== false },
+          ...agGroupChips,
+        ]
+      : []),
     { type: 'separator' },
     { type: 'item', id: 'notify:wait', icon: 'EA8F', text: '等我回答或批准时提醒', checked: settings.notifyWait },
     { type: 'item', id: 'notify:turn', icon: 'E930', text: '每轮结束提示用了多少额度', checked: settings.notifyTurn },
@@ -582,9 +610,16 @@ function openMenu(at) {
           cmd: settings.antigravityQuotaCommand,
           intervalSec: settings.antigravityQuotaIntervalSec,
           isEnabled: settings.antigravityQuotaEnabled,
+          isContextEnabled: settings.antigravityContextEnabled !== false,
         },
         { runImmediately: settings.antigravityQuotaEnabled },
       )
+    },
+    'ag:context': () => {
+      const next = settings.antigravityContextEnabled === false
+      setSetting('antigravityContextEnabled', next)
+      antigravity.configure({ isContextEnabled: next }, { runImmediately: next })
+      sendUsage()
     },
     'ag:group:auto': () => setAntigravityGroup('auto'),
     autostart: () => app.setLoginItemSettings({ openAtLogin: !autoStart }),
@@ -860,6 +895,8 @@ ipcMain.on('resize-step', (_e, direction) => setScale(settings.scale + direction
 
 ipcMain.on('select-group', (_e, groupId) => setAntigravityGroup(groupId))
 
+ipcMain.on('select-task', (_e, cascadeId) => setAntigravityTask(cascadeId))
+
 ipcMain.on('drag-end', () => {
   if (!dragging) return
   if (lastHostRect) {
@@ -916,6 +953,7 @@ if (finishing) {
         cmd: settings.antigravityQuotaCommand,
         intervalSec: settings.antigravityQuotaIntervalSec,
         isEnabled: settings.antigravityQuotaEnabled,
+        isContextEnabled: settings.antigravityContextEnabled !== false,
       },
     )
     watchSessions()

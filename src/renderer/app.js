@@ -3,6 +3,7 @@ const avatar = document.getElementById('avatar')
 const bubble = document.getElementById('bubble')
 const bubbleTitle = document.getElementById('bubble-title')
 const modelBar = document.getElementById('model-bar')
+const agTabs = document.getElementById('ag-tabs')
 const rows = document.getElementById('rows')
 const empty = document.getElementById('empty')
 const updated = document.getElementById('updated')
@@ -30,6 +31,7 @@ let hideTimer = null
 let shownPercent = {} // what each row currently displays, for the rolling animation
 let lastAlertLevel = {}
 let initializedHosts = new Set()
+let agTab = 'all' // 'all' | 'quota' | 'tasks'
 
 // ---------- numbers ----------
 
@@ -62,6 +64,74 @@ function agoText(ms) {
   if (minutes < 60) return `${minutes} 分钟前更新`
   if (minutes < 24 * 60) return `${Math.floor(minutes / 60)} 小时前更新`
   return `${Math.floor(minutes / 1440)} 天前更新`
+}
+
+function shortAgo(ms) {
+  if (!ms) return ''
+  const minutes = Math.floor((Date.now() - ms) / 60000)
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes}m前`
+  if (minutes < 24 * 60) return `${Math.floor(minutes / 60)}h前`
+  return `${Math.floor(minutes / 1440)}d前`
+}
+
+function formatTokens(n) {
+  const num = Number(n) || 0
+  if (num < 1000) return String(Math.round(num))
+  if (num >= 1000000) {
+    const m = num / 1000000
+    return Number.isInteger(m) ? `${m}M` : `${m.toFixed(1).replace(/\.0$/, '')}M`
+  }
+  const k = num / 1000
+  if (num % 1000 === 0 || k >= 100) return `${Math.round(k)}K`
+  return `${k.toFixed(1).replace(/\.0$/, '')}K`
+}
+
+function shortModelName(label) {
+  if (!label) return ''
+  return String(label)
+    .replace(/\s*\((?:Extra High|High|Medium|Low|Thinking)\)/i, m => {
+      const inner = m.slice(m.indexOf('(') + 1, -1).toLowerCase()
+      if (inner === 'extra high') return ' 超高'
+      if (inner === 'high') return ' 高'
+      if (inner === 'medium') return ' 中'
+      if (inner === 'low') return ' 低'
+      return ''
+    })
+    .trim()
+}
+
+function taskTooltip(task) {
+  const stateLabel = task.isRunning ? '运行中' : task.isWaiting ? '等待中' : '空闲'
+  const lines = [`${task.title}（${stateLabel}）`]
+  if (task.hasContext) {
+    const rem = Math.max(0, (task.contextLimit || 0) - (task.contextUsed || 0))
+    const est = task.isEstimated ? '（估算）' : ''
+    lines.push(
+      `上下文：${task.contextUsed.toLocaleString()} / ${task.contextLimit.toLocaleString()} (${task.usagePercent}%)${est} · 剩余 ${formatTokens(rem)}`,
+    )
+    if (task.inputTokens || task.cacheReadTokens || task.outputTokens) {
+      const parts = []
+      if (task.inputTokens) parts.push(`输入 ${formatTokens(task.inputTokens)}`)
+      if (task.cacheReadTokens) parts.push(`缓存 ${formatTokens(task.cacheReadTokens)}`)
+      if (task.cacheCreationTokens) parts.push(`写入缓存 ${formatTokens(task.cacheCreationTokens)}`)
+      if (task.outputTokens) parts.push(`输出 ${formatTokens(task.outputTokens)}`)
+      if (parts.length > 0) lines.push(`明细：${parts.join(' · ')}`)
+    }
+    if (Array.isArray(task.breakdown) && task.breakdown.length > 0) {
+      const top = task.breakdown.slice(0, 4).map(b => `${b.name} ${formatTokens(b.tokens)}`)
+      lines.push(`构成：${top.join(' · ')}`)
+    }
+  } else {
+    lines.push('上下文：尚未收到模型回复')
+  }
+  const metaParts = []
+  if (task.modelLabel || task.model) metaParts.push(task.modelLabel || task.model)
+  if (task.workspace) metaParts.push(task.workspace)
+  if (task.stepCount) metaParts.push(`${task.stepCount} 步`)
+  if (metaParts.length > 0) lines.push(metaParts.join(' · '))
+  lines.push(task.pinned ? '点此取消固定，恢复自动跟随' : '点此固定追踪该任务上下文')
+  return lines.join('\n')
 }
 
 // Rolls a number from its last shown value to the new one.
@@ -149,12 +219,13 @@ function renderClaude() {
   const limits = sortedLimits(usage?.limits)
   bubbleTitle.textContent = 'Claude 额度'
   modelBar.classList.add('hidden')
+  agTabs.classList.add('hidden')
   empty.textContent = emptyMessageFor(usage)
   empty.classList.toggle('hidden', limits.length > 0)
   updated.textContent = usage?.updatedAt ? agoText(usage.updatedAt) : ''
 
-  // Remove any Antigravity group wrappers before updating flat rows
-  for (const g of rows.querySelectorAll('.group')) g.remove()
+  // Remove any Antigravity wrappers before updating flat rows
+  for (const node of rows.querySelectorAll('.group, .task-card, .section-title')) node.remove()
 
   for (const limit of limits) {
     const key = `claude:${limit.kind}`
@@ -182,13 +253,102 @@ function renderClaude() {
     pill.title = `${LABELS[kind]}：${percent}%`
     pillNodes.push(pill)
   }
+  badges.classList.remove('wide')
   badges.replaceChildren(...pillNodes)
+}
+
+function createTaskCard(task) {
+  const card = document.createElement('div')
+  card.className = `task-card${task.active ? ' active' : ''}`
+  card.dataset.task = task.cascadeId
+  card.title = taskTooltip(task)
+  card.addEventListener('click', e => {
+    e.stopPropagation()
+    window.whale.selectTask(task.pinned ? null : task.cascadeId)
+  })
+
+  const head = document.createElement('div')
+  head.className = 'task-head'
+
+  const titleWrap = document.createElement('div')
+  titleWrap.className = 'task-title-wrap'
+  const dot = document.createElement('span')
+  dot.className = `task-dot${task.isRunning ? ' running' : task.isWaiting ? ' waiting' : ''}`
+  titleWrap.append(dot, el('span', 'task-title', task.title))
+
+  const right = document.createElement('div')
+  right.className = 'task-right'
+  if (task.isSubagent) right.append(el('span', 'task-tag', '子代理'))
+  if (task.active) right.append(el('span', 'task-tag primary', task.pinned ? '已固定' : '当前'))
+
+  const pct = Math.round(task.usagePercent || 0)
+  const pctEl = el('b', 'task-pct', task.hasContext ? `${pct}%` : '--')
+  right.append(pctEl)
+  head.append(titleWrap, right)
+  card.appendChild(head)
+
+  const bar = document.createElement('div')
+  bar.className = 'bar'
+  const fill = document.createElement('i')
+  fill.style.width = `${task.hasContext ? Math.min(100, pct) : 0}%`
+  fill.className = task.hasContext ? level(pct) : ''
+  bar.appendChild(fill)
+  card.appendChild(bar)
+
+  const meta = document.createElement('div')
+  meta.className = 'task-meta'
+  const tokensText = task.hasContext
+    ? `${task.isEstimated ? '~' : ''}${formatTokens(task.contextUsed)} / ${formatTokens(task.contextLimit)}`
+    : '暂无上下文'
+  const subParts = []
+  const mLabel = shortModelName(task.modelLabel || task.model)
+  if (mLabel) subParts.push(mLabel)
+  if (task.isRunning) subParts.push('运行中')
+  else if (task.lastModifiedMs) subParts.push(shortAgo(task.lastModifiedMs))
+  meta.append(el('span', 'task-tokens', tokensText), el('span', 'task-sub', subParts.join(' · ')))
+  card.appendChild(meta)
+
+  return card
+}
+
+function renderAntigravityTabs(contextEnabled, taskCount) {
+  if (!contextEnabled) {
+    agTabs.classList.add('hidden')
+    agTabs.replaceChildren()
+    return
+  }
+  agTabs.classList.remove('hidden')
+  const defs = [
+    { id: 'all', label: '全部' },
+    { id: 'quota', label: '额度' },
+    { id: 'tasks', label: taskCount > 0 ? `上下文 (${taskCount})` : '上下文' },
+  ]
+  const nodes = defs.map(def => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = `ag-tab${agTab === def.id ? ' active' : ''}`
+    btn.textContent = def.label
+    btn.addEventListener('click', e => {
+      e.stopPropagation()
+      if (agTab !== def.id) {
+        agTab = def.id
+        renderAntigravity()
+      }
+    })
+    return btn
+  })
+  agTabs.replaceChildren(...nodes)
 }
 
 function renderAntigravity() {
   const groups = Array.isArray(usage?.groups) ? usage.groups : []
-  bubbleTitle.textContent = 'Antigravity 额度'
-  updated.textContent = usage?.updatedAt ? agoText(usage.updatedAt) : ''
+  const contextEnabled = usage?.contextEnabled !== false
+  const tasks = contextEnabled && Array.isArray(usage?.tasks) ? usage.tasks : []
+  if (!contextEnabled && agTab === 'tasks') agTab = 'all'
+
+  bubbleTitle.textContent = contextEnabled ? 'Antigravity' : 'Antigravity 额度'
+  const latestUpdate = Math.max(usage?.updatedAt || 0, usage?.tasksUpdatedAt || 0)
+  updated.textContent = latestUpdate ? agoText(latestUpdate) : ''
 
   if (usage?.activeModel || (usage?.overrideGroup && usage.overrideGroup !== 'auto')) {
     const parts = []
@@ -201,42 +361,71 @@ function renderAntigravity() {
     modelBar.classList.add('hidden')
   }
 
-  empty.textContent = emptyMessageFor(usage)
-  empty.classList.toggle('hidden', groups.length > 0)
+  renderAntigravityTabs(contextEnabled, tasks.length)
 
-  // Rebuild grouped view cleanly (keeps percentage rolling smooth via shownPercent)
-  const groupNodes = []
-  for (const group of groups) {
-    const card = document.createElement('div')
-    card.className = `group${group.active ? ' active' : ''}`
-    card.dataset.group = group.id
-    if (group.color) card.dataset.color = group.color
+  const showQuota = !contextEnabled || agTab === 'all' || agTab === 'quota'
+  const showTasks = contextEnabled && (agTab === 'all' || agTab === 'tasks')
+  const nodes = []
 
-    const head = document.createElement('div')
-    head.className = 'group-head'
-    const locked = usage?.overrideGroup === group.id
-    head.title = locked ? '点此恢复按模型自动切换' : '点此固定查看该分组额度'
-    head.append(el('span', '', group.label || group.id))
-    if (group.active) {
-      head.append(el('span', 'group-tag', locked ? '已固定' : '当前'))
+  if (showQuota && groups.length > 0) {
+    if (showTasks && tasks.length > 0) {
+      const sec = el('div', 'section-title')
+      sec.append(el('span', '', '订阅额度'), el('span', '', `${groups.length} 组`))
+      nodes.push(sec)
     }
-    head.addEventListener('click', e => {
-      e.stopPropagation()
-      window.whale.selectGroup(locked ? 'auto' : group.id)
-    })
-    card.appendChild(head)
+    for (const group of groups) {
+      const card = document.createElement('div')
+      card.className = `group${group.active ? ' active' : ''}`
+      card.dataset.group = group.id
+      if (group.color) card.dataset.color = group.color
 
-    for (const limit of sortedLimits(group.limits)) {
-      const key = `antigravity:${group.id}:${limit.kind}`
-      const row = createRowElement(key, limit, group.color, true)
-      updateRowElement(row, key, limit, null, true)
-      card.appendChild(row)
+      const head = document.createElement('div')
+      head.className = 'group-head'
+      const locked = usage?.overrideGroup === group.id
+      head.title = locked ? '点此恢复按模型自动切换' : '点此固定查看该分组额度'
+      head.append(el('span', '', group.label || group.id))
+      if (group.active) {
+        head.append(el('span', 'group-tag', locked ? '已固定' : '当前'))
+      }
+      head.addEventListener('click', e => {
+        e.stopPropagation()
+        window.whale.selectGroup(locked ? 'auto' : group.id)
+      })
+      card.appendChild(head)
+
+      for (const limit of sortedLimits(group.limits)) {
+        const key = `antigravity:${group.id}:${limit.kind}`
+        const row = createRowElement(key, limit, group.color, true)
+        updateRowElement(row, key, limit, null, true)
+        card.appendChild(row)
+      }
+      nodes.push(card)
     }
-    groupNodes.push(card)
   }
-  rows.replaceChildren(...groupNodes)
 
-  // Pills under the pet: only the active model's group (up to 2 windows)
+  if (showTasks && tasks.length > 0) {
+    if (showQuota && groups.length > 0) {
+      const sec = el('div', 'section-title')
+      sec.append(el('span', '', '任务上下文'), el('span', '', `${tasks.length} 个`))
+      nodes.push(sec)
+    }
+    for (const task of tasks) {
+      nodes.push(createTaskCard(task))
+    }
+  }
+
+  rows.replaceChildren(...nodes)
+
+  const isEmpty = nodes.length === 0
+  if (isEmpty) {
+    empty.textContent =
+      agTab === 'tasks'
+        ? '未检测到反重力任务。启动反重力并打开任意对话后，这里会实时显示每个任务的上下文占用。'
+        : emptyMessageFor(usage)
+  }
+  empty.classList.toggle('hidden', !isEmpty)
+
+  // Pills under the pet: active model's quota group (up to 2 windows) + active task's context usage
   const activeLimits = sortedLimits(usage?.limits).slice(0, 2)
   const pillNodes = activeLimits.map((limit, idx) => {
     const percent = Math.round(effectivePercent(limit))
@@ -250,6 +439,19 @@ function renderAntigravity() {
     pill.title = `${limit.groupLabel || ''} ${winLabel}：${percent}%`.trim()
     return pill
   })
+
+  const activeTask = contextEnabled ? usage?.activeTask : null
+  if (activeTask && activeTask.hasContext) {
+    const pct = Math.round(activeTask.usagePercent || 0)
+    const pill = document.createElement('span')
+    pill.dataset.kind = 'context'
+    pill.className = `pill ${level(pct)}`
+    pill.textContent = `Ctx ${pct}%`
+    pill.title = taskTooltip(activeTask)
+    pillNodes.push(pill)
+  }
+
+  badges.classList.toggle('wide', pillNodes.length >= 3)
   badges.replaceChildren(...pillNodes)
 }
 
