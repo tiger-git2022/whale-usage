@@ -7,6 +7,7 @@
 
 const { app, net } = require('electron')
 const fs = require('fs')
+const os = require('os')
 const path = require('path')
 const { spawn } = require('child_process')
 const log = require('./log')
@@ -19,6 +20,62 @@ const LATEST_API_URL = `https://api.github.com/repos/${REPO}/releases/latest`
 
 // electron-builder's portable exe sets these; the installed app does not.
 const portableFile = () => process.env.PORTABLE_EXECUTABLE_FILE || null
+
+function normalizeDir(dir) {
+  if (!dir || typeof dir !== 'string') return ''
+  const resolved = path.win32.resolve(dir).replace(/[\\/]+$/, '')
+  return resolved.toLowerCase()
+}
+
+// True when `exePath` points inside the system temp folder (e.g. an unpacked electron-builder portable stub).
+function isTempExecutablePath(exePath, tmpDir = os.tmpdir()) {
+  if (!exePath || typeof exePath !== 'string') return false
+  const tmp = normalizeDir(tmpDir)
+  if (!tmp) return false
+  const exe = normalizeDir(exePath)
+  return exe.startsWith(`${tmp}\\`) || exe.startsWith(`${tmp}/`)
+}
+
+// Resolves the outer portable exe path: prefers PORTABLE_EXECUTABLE_FILE, and falls back to the last
+// known portable exe when launched directly from an unpacked %TEMP% stub (e.g. a broken legacy autostart).
+function resolvePortableExe({
+  envPortable = process.env.PORTABLE_EXECUTABLE_FILE,
+  execPath = process.execPath,
+  savedPortable = null,
+  existsSync = fs.existsSync,
+  tmpDir = os.tmpdir(),
+} = {}) {
+  if (typeof envPortable === 'string' && envPortable.trim()) return envPortable.trim()
+  if (typeof savedPortable === 'string' && savedPortable.trim() && isTempExecutablePath(execPath, tmpDir)) {
+    const candidate = savedPortable.trim()
+    try {
+      if (existsSync(candidate)) return candidate
+    } catch {
+      // ignore fs errors
+    }
+  }
+  return null
+}
+
+// Builds options for Electron's app.setLoginItemSettings / getLoginItemSettings so Windows autostart
+// points at the real outer portable exe instead of the temporary unpacked %TEMP% binary.
+function loginItemOptions(openAtLogin, portablePath = null) {
+  const opts = { openAtLogin: Boolean(openAtLogin) }
+  if (typeof portablePath === 'string' && portablePath.trim()) opts.path = portablePath.trim()
+  return opts
+}
+
+// Extracts the executable path from a Windows Run registry REG_SZ value (quoted or unquoted).
+function parseRunEntryPath(raw) {
+  if (!raw || typeof raw !== 'string') return null
+  const text = raw.trim()
+  if (!text) return null
+  const quoted = text.match(/^"([^"]+)"/)
+  if (quoted) return quoted[1].trim() || null
+  const exeMatch = text.match(/^(.+?\.exe)(?:\s|$)/i)
+  if (exeMatch) return exeMatch[1].trim() || null
+  return text.split(/\s+/)[0] || null
+}
 
 async function getJson(url) {
   const response = await net.fetch(url, {
@@ -93,8 +150,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
  * windowed program like this one, needs no script, and Chinese or other characters in paths are fine.
  * Only the portable exe updates itself (a source checkout has no exe to replace).
  */
-async function installUpdate(update, onProgress) {
-  const portable = portableFile()
+async function installUpdate(update, onProgress, portableOverride = null) {
+  const portable = portableOverride || portableFile()
   if (!portable) throw new Error('只有打包好的 exe 能自动更新，源码运行请用 git pull')
   const asset = pickAsset(update)
   if (!asset) throw new Error('这个版本没有可下载的 exe')
@@ -140,8 +197,8 @@ async function finishUpdate(target) {
  * Removes the `<exe>.new` an update left behind. Right after an update the copy that finished it may
  * still be closing, so this keeps trying for a minute.
  */
-async function cleanUpAfterUpdate() {
-  const portable = portableFile()
+async function cleanUpAfterUpdate(portableOverride = null) {
+  const portable = portableOverride || portableFile()
   if (!portable) return
   const leftover = `${portable}.new`
   for (let i = 0; i < 30 && fs.existsSync(leftover); i++) {
@@ -156,4 +213,15 @@ async function cleanUpAfterUpdate() {
   }
 }
 
-module.exports = { checkForUpdate, installUpdate, finishTarget, finishUpdate, cleanUpAfterUpdate, RELEASES_URL }
+module.exports = {
+  checkForUpdate,
+  installUpdate,
+  finishTarget,
+  finishUpdate,
+  cleanUpAfterUpdate,
+  isTempExecutablePath,
+  resolvePortableExe,
+  loginItemOptions,
+  parseRunEntryPath,
+  RELEASES_URL,
+}
