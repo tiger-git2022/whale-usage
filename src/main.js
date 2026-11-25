@@ -259,7 +259,7 @@ function tick() {
       sendUsage()
     }
     const uiTexts = composer.usageTextsOf(state.window.hwnd)
-    if (uiTexts) {
+    if (uiTexts && antigravity.state().source !== 'native') {
       const sig = uiTexts.join('|')
       if (sig !== lastUiUsageSignature) {
         lastUiUsageSignature = sig
@@ -326,7 +326,10 @@ function readClaudeUsage() {
 
 function readAntigravityUsage() {
   const fileUsage = antigravity.readUsageFile()
-  const merged = antigravity.mergeUsage(fileUsage, antigravity.latest())
+  const pollerState = antigravity.state()
+  const merged = antigravity.mergeUsage(fileUsage, antigravity.latest(), {
+    authoritative: pollerState.source === 'native',
+  })
   const hookState = antigravity.readState()
   const activeModel = antigravity.pickActiveModel({
     uiModel: lastUiModel,
@@ -335,7 +338,6 @@ function readAntigravityUsage() {
     hookUpdatedAt: hookState?.updatedAt,
     usageModel: merged?.activeModel,
   })
-  const pollerState = antigravity.state()
   const taskSnapshot = antigravity.latestTasks()
   const payload = antigravity.buildRendererPayload({
     usage: merged,
