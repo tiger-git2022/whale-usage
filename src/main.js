@@ -1,4 +1,5 @@
 const { app, BrowserWindow, Notification, Tray, dialog, ipcMain, nativeImage, screen, shell } = require('electron')
+const { execFile } = require('child_process')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
@@ -65,6 +66,7 @@ const DEFAULTS = {
   antigravityGroupOverride: 'auto', // 'auto' follows active model, or a specific group id
   antigravityContextEnabled: true, // show per-task context window usage in Antigravity mode
   antigravityPinnedTaskId: null, // optional cascadeId pinned by clicking a task card
+  lastPortableExe: null, // remembers the real outer portable exe path across %TEMP% launches
 }
 
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json')
@@ -483,9 +485,54 @@ function setAntigravityTask(cascadeId) {
   sendUsage()
 }
 
+function portableExePath() {
+  return updater.resolvePortableExe({
+    envPortable: process.env.PORTABLE_EXECUTABLE_FILE,
+    execPath: process.execPath,
+    savedPortable: settings.lastPortableExe,
+  })
+}
+
+function isAutoStartEnabled() {
+  const exe = portableExePath()
+  if (exe && app.getLoginItemSettings({ path: exe }).openAtLogin) return true
+  return app.getLoginItemSettings().openAtLogin
+}
+
+function setAutoStart(enable) {
+  const exe = portableExePath()
+  app.setLoginItemSettings(updater.loginItemOptions(enable, exe))
+  if (!enable && exe && app.getLoginItemSettings().openAtLogin) {
+    app.setLoginItemSettings({ openAtLogin: false })
+  }
+}
+
+// Older builds registered %TEMP%\<hash>\Whale Usage.exe in HKCU\...\Run when turning on autostart.
+// Launching from that temp stub drops PORTABLE_EXECUTABLE_FILE and disables self-updates; repair it.
+function repairPortableAutoStart() {
+  if (process.platform !== 'win32') return
+  const exe = portableExePath()
+  if (!exe) return
+  const valueName = `electron.app.${app.getName()}`
+  execFile(
+    'reg.exe',
+    ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v', valueName],
+    { windowsHide: true, timeout: 4000 },
+    (err, stdout) => {
+      if (err || !stdout) return
+      const match = String(stdout).match(/REG_(?:EXPAND_)?SZ\s+(.+)/i)
+      if (!match) return
+      const registered = updater.parseRunEntryPath(match[1])
+      if (!registered || !updater.isTempExecutablePath(registered)) return
+      app.setLoginItemSettings(updater.loginItemOptions(true, exe))
+      log.info('repaired autostart path from temp stub to portable exe:', registered, '->', exe)
+    },
+  )
+}
+
 // The right-click menu, for the tray icon and the character. Icons are Segoe Fluent Icons code points.
 function openMenu(at) {
-  const autoStart = app.getLoginItemSettings().openAtLogin
+  const autoStart = isAutoStartEnabled()
   const skins = SKINS.map(s => ({ id: `skin:${s.id}`, text: s.name, selected: settings.skin === s.id }))
   if (settings.customSkin) skins.push({ id: 'skin:custom', text: '自定义', selected: settings.skin === 'custom' })
 
@@ -622,7 +669,7 @@ function openMenu(at) {
       sendUsage()
     },
     'ag:group:auto': () => setAntigravityGroup('auto'),
-    autostart: () => app.setLoginItemSettings({ openAtLogin: !autoStart }),
+    autostart: () => setAutoStart(!autoStart),
     autoupdate: () => setSetting('autoUpdate', !settings.autoUpdate),
     check: () => checkUpdates({ manual: true }),
     data: () => shell.openPath(activeHost === 'antigravity' ? antigravity.whaleDir() : path.dirname(usagePath())),
@@ -703,7 +750,7 @@ async function checkUpdates({ manual = false } = {}) {
     return
   }
   // The portable exe updates itself right away; a run from source can only point at the release page.
-  if (!process.env.PORTABLE_EXECUTABLE_FILE) {
+  if (!portableExePath()) {
     if (manual) promptUpdate(update)
     return
   }
@@ -726,14 +773,18 @@ async function installNow(update, { manual = false } = {}) {
   try {
     setProgress('正在下载更新…')
     let lastPercent = -1
-    await updater.installUpdate(update, (done, total) => {
-      if (!total) return
-      const percent = Math.floor((done / total) * 100)
-      if (percent !== lastPercent && percent % 5 === 0) {
-        lastPercent = percent
-        setProgress(`正在下载更新 ${percent}%`)
-      }
-    })
+    await updater.installUpdate(
+      update,
+      (done, total) => {
+        if (!total) return
+        const percent = Math.floor((done / total) * 100)
+        if (percent !== lastPercent && percent % 5 === 0) {
+          lastPercent = percent
+          setProgress(`正在下载更新 ${percent}%`)
+        }
+      },
+      portableExePath(),
+    )
   } catch (err) {
     log.error('update failed', err)
     setProgress(null)
@@ -744,7 +795,7 @@ async function installNow(update, { manual = false } = {}) {
 
 // For a run from source (no exe to replace), or the menu's update row after a failed update
 async function promptUpdate(update) {
-  const portable = Boolean(process.env.PORTABLE_EXECUTABLE_FILE)
+  const portable = Boolean(portableExePath())
   const { response } = await dialog.showMessageBox({
     type: 'info',
     title: '发现新版本',
@@ -926,15 +977,20 @@ if (finishing) {
 } else {
   app.whenReady().then(() => {
     log.init(path.join(app.getPath('userData'), 'logs'))
+    loadSettings()
+    if (process.env.PORTABLE_EXECUTABLE_FILE && settings.lastPortableExe !== process.env.PORTABLE_EXECUTABLE_FILE) {
+      setSetting('lastPortableExe', process.env.PORTABLE_EXECUTABLE_FILE)
+    }
+    const portableExe = portableExePath()
     log.info(
       `start v${app.getVersion()}`,
-      process.env.PORTABLE_EXECUTABLE_FILE ? `portable ${process.env.PORTABLE_EXECUTABLE_FILE}` : 'installed',
+      portableExe ? `portable ${portableExe}` : 'installed',
       `claude usage ${usagePath()}`,
       `antigravity usage ${antigravity.usagePath()}`,
     )
     process.on('uncaughtException', err => log.error('uncaught', err))
-    loadSettings()
-    updater.cleanUpAfterUpdate()
+    repairPortableAutoStart()
+    updater.cleanUpAfterUpdate(portableExe)
     createWindow()
     tray = new Tray(trayIcon())
     tray.setToolTip('Whale Usage：订阅额度')
