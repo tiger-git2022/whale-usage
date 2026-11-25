@@ -1,7 +1,7 @@
 // A small run log in <userData>/logs/main.log, kept under 1 MB (the previous one is main.old.log).
 // The tray menu opens the folder; it is what to look at when the widget or an update misbehaves.
 
-const { app } = require('electron')
+const { app } = process.versions.electron ? require('electron') : {}
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
@@ -35,7 +35,7 @@ function write(level, args) {
       }
     }
   }
-  if (app.isPackaged) return
+  if (app?.isPackaged) return
   try {
     ;(level === 'ERROR' ? process.stderr : process.stdout).write(line)
   } catch {}

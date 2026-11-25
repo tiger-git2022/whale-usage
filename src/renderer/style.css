@@ -49,14 +49,18 @@ html, body {
 #pet.dragging { cursor: grabbing; animation: none; }
 
 #avatar {
+  position: relative;
+  top: 0;
   width: 100%;
   height: 100%;
   object-fit: contain;
   filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.35));
   transform-origin: 50% 100%;
-  transition: transform 120ms ease-out;
+  transition: transform 120ms ease-out, top 160ms ease-out;
   pointer-events: none;
 }
+
+#pet.stacked-badges #avatar { top: -8px; }
 
 #pet:hover #avatar { transform: scale(1.04); }
 #pet.pressed #avatar { transform: scale(1.1, 0.86); transition: transform 90ms ease-out; }
@@ -85,11 +89,22 @@ html, body {
   pointer-events: none;
 }
 
-#badges.wide {
-  left: auto;
-  right: 0;
-  transform: none;
-  justify-content: flex-end;
+#badges.stacked {
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.badge-row {
+  display: flex;
+  justify-content: center;
+  gap: 3px;
+}
+
+#badges.stacked .pill {
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 15px;
 }
 
 .pill {
