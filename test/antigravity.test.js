@@ -8,6 +8,8 @@ const {
   classifyBucket,
   normalizeUsage,
   mergeUsage,
+  readUsageFile,
+  saveUsageFile,
   resolveActiveGroup,
   pickActiveModel,
   buildRendererPayload,
@@ -273,6 +275,122 @@ test('mergeUsage keeps higher percent within the same window and newer reading a
     groups: [{ id: 'gemini', limits: [{ kind: 'five_hour', percentUsed: 5, resetsAt: '2026-11-21T10:00:00.000Z' }] }],
   })
   assert.strictEqual(mergeUsage(file, cliReset).groups.find(g => g.id === 'gemini').limits[0].percentUsed, 5)
+})
+
+test('mergeUsage drops removed groups from stale usage.json when native RPC is authoritative', () => {
+  const staleFile = normalizeUsage({
+    updatedAt: 1000,
+    activeModel: 'gemini-4-neon-high',
+    groups: [
+      {
+        id: 'gemini',
+        limits: [
+          { kind: 'five_hour', percentUsed: 100, resetsAt: '2026-11-20T20:07:23.000Z' },
+          { kind: 'seven_day', percentUsed: 30, resetsAt: '2026-11-27T14:51:23.000Z' },
+        ],
+      },
+      {
+        id: 'gemini_argon',
+        limits: [{ kind: 'seven_day', percentUsed: 29, resetsAt: '2026-11-27T15:51:23.000Z' }],
+      },
+      {
+        id: 'claude',
+        limits: [{ kind: 'seven_day', percentUsed: 52, resetsAt: '2026-11-27T17:51:23.000Z' }],
+      },
+    ],
+  })
+  const liveNative = normalizeUsage({
+    updatedAt: 2000,
+    groups: [
+      {
+        id: 'gemini',
+        limits: [
+          { kind: 'five_hour', percentUsed: 0, resetsAt: '2026-11-25T18:00:00.000Z' },
+          { kind: 'seven_day', percentUsed: 36, resetsAt: '2026-12-01T15:30:00.000Z' },
+        ],
+      },
+      {
+        id: 'claude',
+        limits: [
+          { kind: 'five_hour', percentUsed: 0 },
+          { kind: 'seven_day', percentUsed: 0 },
+        ],
+      },
+    ],
+  })
+
+  // Non-authoritative fallback keeps groups present only in the file
+  const fallbackMerged = mergeUsage(staleFile, liveNative)
+  assert.deepStrictEqual(
+    fallbackMerged.groups.map(g => g.id),
+    ['gemini', 'gemini_argon', 'claude'],
+  )
+
+  // Authoritative native RPC drops stale groups and uses the live snapshot directly
+  const authoritativeMerged = mergeUsage(staleFile, liveNative, { authoritative: true })
+  assert.deepStrictEqual(
+    authoritativeMerged.groups.map(g => g.id),
+    ['gemini', 'claude'],
+  )
+  assert.strictEqual(authoritativeMerged.activeModel, 'gemini-4-neon-high')
+  assert.strictEqual(authoritativeMerged.groups.find(g => g.id === 'gemini').limits[1].percentUsed, 36)
+  assert.strictEqual(authoritativeMerged.groups.find(g => g.id === 'claude').limits[1].percentUsed, 0)
+
+  // If the file is actually newer than the cached native snapshot, keep merging normally
+  const newerFile = normalizeUsage({
+    updatedAt: 3000,
+    groups: [
+      { id: 'gemini', limits: [{ kind: 'seven_day', percentUsed: 40, resetsAt: '2026-12-01T15:30:00.000Z' }] },
+      { id: 'gemini_argon', limits: [{ kind: 'seven_day', percentUsed: 12 }] },
+    ],
+  })
+  const withNewerFile = mergeUsage(newerFile, liveNative, { authoritative: true })
+  assert.deepStrictEqual(
+    withNewerFile.groups.map(g => g.id),
+    ['gemini', 'gemini_argon', 'claude'],
+  )
+  assert.strictEqual(withNewerFile.groups.find(g => g.id === 'gemini').limits[1].percentUsed, 40)
+})
+
+test('saveUsageFile overwrites stale cached groups atomically on disk', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-ag-usage-'))
+  const file = path.join(dir, 'usage.json')
+  try {
+    saveUsageFile(
+      normalizeUsage({
+        updatedAt: 1000,
+        groups: [
+          { id: 'gemini', limits: [{ kind: 'seven_day', percentUsed: 30 }] },
+          { id: 'gemini_argon', limits: [{ kind: 'seven_day', percentUsed: 29 }] },
+        ],
+      }),
+      file,
+    )
+    assert.deepStrictEqual(
+      readUsageFile(file).groups.map(g => g.id),
+      ['gemini', 'gemini_argon'],
+    )
+
+    saveUsageFile(
+      normalizeUsage({
+        updatedAt: 2000,
+        groups: [
+          { id: 'gemini', limits: [{ kind: 'seven_day', percentUsed: 36 }] },
+          { id: 'claude', limits: [{ kind: 'seven_day', percentUsed: 0 }] },
+        ],
+      }),
+      file,
+    )
+    const reloaded = readUsageFile(file)
+    assert.deepStrictEqual(
+      reloaded.groups.map(g => g.id),
+      ['gemini', 'claude'],
+    )
+    assert.strictEqual(reloaded.groups[0].limits[0].percentUsed, 36)
+    assert.deepStrictEqual(fs.readdirSync(dir), ['usage.json'])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('isLoginRequired recognizes antigravity-usage not-logged-in output', () => {

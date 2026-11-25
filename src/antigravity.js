@@ -307,11 +307,24 @@ function normalizeUsage(raw, now = Date.now()) {
   return { updatedAt, activeModel, groups }
 }
 
-// Merges file-based usage with external CLI usage (higher value wins inside the same window).
-function mergeUsage(fileUsage, cliUsage) {
+// Merges file-based usage with live polled usage.
+// When `authoritative` is true (Antigravity's native local RPC) and the incoming snapshot is at
+// least as new as the file, the live snapshot replaces the group/window set so removed quota pools
+// (or another account's cached groups) are never resurrected from a stale usage.json.
+function mergeUsage(fileUsage, cliUsage, { authoritative = false } = {}) {
   if (!cliUsage || !Array.isArray(cliUsage.groups) || cliUsage.groups.length === 0) return fileUsage
   if (!fileUsage || !Array.isArray(fileUsage.groups) || fileUsage.groups.length === 0) return cliUsage
   const cliNewer = (cliUsage.updatedAt ?? 0) >= (fileUsage.updatedAt ?? 0)
+  if (authoritative && cliNewer) {
+    const groups = cliUsage.groups
+      .map(g => ({ ...g, models: [...(g.models || [])], limits: [...g.limits] }))
+      .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
+    return {
+      updatedAt: cliUsage.updatedAt ?? Date.now(),
+      activeModel: cliUsage.activeModel ?? fileUsage.activeModel ?? null,
+      groups,
+    }
+  }
   const map = new Map()
   for (const g of fileUsage.groups) {
     map.set(g.id, { ...g, models: [...(g.models || [])], limits: [...g.limits] })
@@ -397,7 +410,19 @@ function saveUsageFile(usage, file = usagePath()) {
   if (!usage || !Array.isArray(usage.groups) || usage.groups.length === 0) return
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, JSON.stringify(usage, null, 2))
+    const content = JSON.stringify(usage, null, 2)
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+    fs.writeFileSync(tmp, content)
+    try {
+      fs.renameSync(tmp, file)
+    } catch {
+      fs.writeFileSync(file, content)
+      try {
+        fs.unlinkSync(tmp)
+      } catch {
+        // ignore cleanup failure
+      }
+    }
   } catch (err) {
     log.warn('could not save antigravity usage file', err.message)
   }
@@ -1206,6 +1231,7 @@ function applyNativeResult(result) {
     contextReader.setEndpoint(result.endpointInfo)
   }
   nativeError = null
+  saveUsageFile(result.usage)
   if (changedSource) log.info(`antigravity local quota: ${result.endpoint} (${result.source})`)
   finishPoll('ok', null, intervalMs)
 }
