@@ -7,7 +7,7 @@ const { BrowserWindow, ipcMain, nativeTheme, screen, systemPreferences } = requi
 const os = require('os')
 const path = require('path')
 const log = require('./log')
-const { roundCorners } = require('./win32')
+const { roundCorners, makeToolWindow } = require('./win32')
 
 // The acrylic system backdrop needs Windows 11 22H2 (build 22621)
 const ACRYLIC = Number(os.release().split('.')[2]) >= 22621
@@ -59,6 +59,11 @@ function show(entries, handlers, at = screen.getCursorScreenPoint()) {
     },
   })
   menu = { win, handlers, at }
+  try {
+    makeToolWindow(win.getNativeWindowHandle())
+  } catch (err) {
+    log.warn('could not configure menu window style', err.message)
+  }
   win.setAlwaysOnTop(true, 'pop-up-menu')
   win.on('blur', () => menu?.win === win && close())
   win.on('closed', () => {
@@ -81,9 +86,10 @@ ipcMain.on('menu-size', (e, size) => {
   win.setBounds(place(at, size.width, size.height))
   if (!win.isVisible()) {
     try {
+      makeToolWindow(win.getNativeWindowHandle())
       roundCorners(win.getNativeWindowHandle())
     } catch (err) {
-      log.warn('could not round the menu corners', err.message)
+      log.warn('could not style the menu window', err.message)
     }
     win.show()
     win.focus()
