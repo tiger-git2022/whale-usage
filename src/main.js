@@ -12,7 +12,7 @@ const webusage = require('./webusage')
 const antigravity = require('./antigravity')
 const composer = require('./composer')
 const limits = require('./limits')
-const { targetState } = require('./win32')
+const { targetState, makeToolWindow } = require('./win32')
 
 // The widget window at 100% size: the character sits at its bottom-right, the bubble above it.
 // The page is zoomed by settings.scale, so these all scale together.
@@ -192,9 +192,19 @@ function boundsFor(hostRect, box, host = activeHost) {
   }
 }
 
+function ensureToolWindow() {
+  if (!win || win.isDestroyed()) return
+  try {
+    makeToolWindow(win.getNativeWindowHandle())
+  } catch (err) {
+    log.warn('could not configure overlay window style', err.message)
+  }
+}
+
 function setShown(show) {
   if (show === isShown) return
   isShown = show
+  ensureToolWindow()
   if (show) win.showInactive()
   else win.hide()
 }
@@ -933,6 +943,7 @@ function createWindow() {
   })
   win.setAlwaysOnTop(true, 'floating')
   win.setIgnoreMouseEvents(true, { forward: true })
+  ensureToolWindow()
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
   win.webContents.on('did-finish-load', () => {
     win.webContents.setZoomFactor(settings.scale)

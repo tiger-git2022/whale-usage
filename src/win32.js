@@ -19,6 +19,9 @@ const GetWindowRect = user32.func('bool __stdcall GetWindowRect(intptr hwnd, _Ou
 const GetForegroundWindow = user32.func('intptr __stdcall GetForegroundWindow()')
 const GetWindowTextLengthW = user32.func('int __stdcall GetWindowTextLengthW(intptr hwnd)')
 const GetClassNameW = user32.func('int __stdcall GetClassNameW(intptr hwnd, void *buf, int max)')
+const GetWindowLongW = user32.func('int32 __stdcall GetWindowLongW(intptr hwnd, int32 index)')
+const SetWindowLongW = user32.func('int32 __stdcall SetWindowLongW(intptr hwnd, int32 index, int32 value)')
+const SetWindowPos = user32.func('bool __stdcall SetWindowPos(intptr hwnd, intptr after, int32 x, int32 y, int32 cx, int32 cy, uint32 flags)')
 
 const OpenProcess = kernel32.func('intptr __stdcall OpenProcess(uint32 access, bool inherit, uint32 pid)')
 const QueryFullProcessImageNameW = kernel32.func('bool __stdcall QueryFullProcessImageNameW(intptr proc, uint32 flags, void *buf, _Inout_ uint32 *size)')
@@ -29,7 +32,16 @@ const DwmGetWindowAttributeInt = dwmapi.func('int32 __stdcall DwmGetWindowAttrib
 const DwmSetWindowAttributeInt = dwmapi.func('int32 __stdcall DwmSetWindowAttribute(intptr hwnd, uint32 attr, int32 *value, uint32 size)')
 
 const GW_OWNER = 4
+const GWL_EXSTYLE = -20
+const WS_EX_TOOLWINDOW = 0x00000080
+const WS_EX_APPWINDOW = 0x00040000
+const SWP_NOSIZE = 0x0001
+const SWP_NOMOVE = 0x0002
+const SWP_NOZORDER = 0x0004
+const SWP_NOACTIVATE = 0x0010
+const SWP_FRAMECHANGED = 0x0020
 const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+const DWMWA_TRANSITIONS_FORCEDISABLED = 3
 const DWMWA_EXTENDED_FRAME_BOUNDS = 9
 const DWMWA_CLOAKED = 14
 const DWMWA_WINDOW_CORNER_PREFERENCE = 33
@@ -155,10 +167,46 @@ function targetState(cached, ownPid, mode = 'auto') {
 const findClaudeWindow = () => findTargetWindow('claude')
 const claudeState = (cached, ownPid) => targetState(cached, ownPid, 'claude')
 
+function hwndFromHandle(handleBuffer) {
+  if (!handleBuffer || handleBuffer.length < 4) return 0
+  return handleBuffer.length >= 8 ? Number(handleBuffer.readBigUInt64LE(0)) : handleBuffer.readUInt32LE(0)
+}
+
+function toolWindowExStyle(exStyle) {
+  return (exStyle | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+}
+
+// Marks an overlay/menu window as a Win32 tool window and disables DWM transitions.
+// Keeps it out of Alt+Tab and prevents Windows or third-party animation hooks (e.g. Windhawk's
+// Windows Animations) from playing open/close/hide animations on it.
+function makeToolWindow(handleBuffer) {
+  const hwnd = hwndFromHandle(handleBuffer)
+  if (!hwnd) return
+  const current = GetWindowLongW(hwnd, GWL_EXSTYLE)
+  const next = toolWindowExStyle(current)
+  if (next !== current) {
+    SetWindowLongW(hwnd, GWL_EXSTYLE, next)
+    SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+  }
+  DwmSetWindowAttributeInt(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, [1], 4)
+}
+
 // Windows 11 rounds the corners of a frameless window only when asked; Windows 10 ignores this.
 function roundCorners(handleBuffer) {
-  const hwnd = Number(handleBuffer.readBigUInt64LE(0))
+  const hwnd = hwndFromHandle(handleBuffer)
+  if (!hwnd) return
   DwmSetWindowAttributeInt(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, [DWMWCP_ROUND], 4)
 }
 
-module.exports = { targetState, findTargetWindow, claudeState, findClaudeWindow, hostOfExePath, roundCorners }
+module.exports = {
+  targetState,
+  findTargetWindow,
+  claudeState,
+  findClaudeWindow,
+  hostOfExePath,
+  roundCorners,
+  makeToolWindow,
+  toolWindowExStyle,
+  WS_EX_TOOLWINDOW,
+  WS_EX_APPWINDOW,
+}
