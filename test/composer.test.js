@@ -1,6 +1,13 @@
 const test = require('node:test')
 const assert = require('node:assert')
-const { isLimitBanner, isModelLabel, extractModelLabel, bannerDue } = require('../src/composer')
+const {
+  isLimitBanner,
+  isModelLabel,
+  extractModelLabel,
+  extractConversationId,
+  normalizeConversationTitles,
+  bannerDue,
+} = require('../src/composer')
 
 test('isLimitBanner knows the weekly limit banner in Chinese and English', () => {
   assert.ok(isLimitBanner('即将达到每周使用限额11月8日周日 23:00 重置'))
@@ -67,4 +74,39 @@ test('fitToWindow maps a box Windows scaled back onto the real window', () => {
   assert.strictEqual(fitToWindow(box, real, widened), box)
   const nudged = { ...real, right: real.right + 20, bottom: real.bottom + 10 }
   assert.strictEqual(fitToWindow(box, real, nudged), box)
+})
+
+test('extractConversationId parses Antigravity Hub URLs and raw UUIDs', () => {
+  assert.strictEqual(
+    extractConversationId('https://127.0.0.1:64839/c/62308798-E0F9-4C45-90E7-FD1A71021900?project=outside-of-project#t=secret'),
+    '62308798-e0f9-4c45-90e7-fd1a71021900',
+  )
+  assert.strictEqual(
+    extractConversationId('https://localhost:50000/conversations/1d7c5b5a-fdaf-44c2-869c-b12df5678e62'),
+    '1d7c5b5a-fdaf-44c2-869c-b12df5678e62',
+  )
+  assert.strictEqual(
+    extractConversationId('https://127.0.0.1:64839/?cascadeId=32a82c3c-15f3-490f-a46d-d83e83119662&tab=chat'),
+    '32a82c3c-15f3-490f-a46d-d83e83119662',
+  )
+  assert.strictEqual(extractConversationId('b475df1e-15c4-4034-aa3a-f6368cb1d2c7'), 'b475df1e-15c4-4034-aa3a-f6368cb1d2c7')
+  assert.strictEqual(extractConversationId('https://127.0.0.1:64839/#t=secret'), null)
+  assert.strictEqual(extractConversationId('https://127.0.0.1:64839/settings'), null)
+  assert.strictEqual(extractConversationId(''), null)
+})
+
+test('normalizeConversationTitles cleans suffixes, skips generic labels, and deduplicates', () => {
+  assert.deepStrictEqual(
+    normalizeConversationTitles([
+      'Antigravity',
+      'TranslateTB显示器断开报错修复 - Antigravity',
+      'TranslateTB显示器断开报错修复',
+      '使用情况',
+      '  Anti-Gravity\nContext   Switching Bug  ',
+    ]),
+    ['TranslateTB显示器断开报错修复', 'Anti-Gravity Context Switching Bug'],
+  )
+  assert.deepStrictEqual(normalizeConversationTitles('Windhawk And QTTabBar Conflict — Antigravity'), [
+    'Windhawk And QTTabBar Conflict',
+  ])
 })

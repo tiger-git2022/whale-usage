@@ -1013,6 +1013,8 @@ function buildRendererPayload({
   tasks = null,
   tasksUpdatedAt = null,
   pinnedTaskId = null,
+  uiConversationId = null,
+  uiConversationTitles = null,
   hookConversationId = null,
   contextEnabled = true,
 }) {
@@ -1025,7 +1027,9 @@ function buildRendererPayload({
     ? chosen.limits.map(l => ({ ...l, groupId: chosen.id, groupLabel: chosen.label, shortLabel: chosen.shortLabel, color: chosen.color }))
     : []
   const rawTasks = contextEnabled && Array.isArray(tasks) ? tasks : []
-  const resolvedTask = contextEnabled ? context.resolveActiveTask(rawTasks, { pinnedTaskId, hookConversationId }) : null
+  const resolvedTask = contextEnabled
+    ? context.resolveActiveTask(rawTasks, { pinnedTaskId, uiConversationId, uiConversationTitles, hookConversationId })
+    : null
   const normalizedTasks = rawTasks.map(task => ({
     ...task,
     active: Boolean(resolvedTask && task.cascadeId === resolvedTask.cascadeId),
@@ -1117,10 +1121,13 @@ let contextEnabled = true
 let contextForeground = false
 let contextTimer = null
 let contextRunning = false
+let contextRefreshPending = false
 let lastContextRunAt = 0
 let latestTasks = []
 let latestTasksUpdatedAt = null
 let lastTasksSig = ''
+let focusedTaskId = null
+let pinnedTaskId = null
 
 function tasksSignature(list) {
   return (list || [])
@@ -1137,14 +1144,18 @@ function scheduleNextContext(delay) {
 function runContextOnce({ force = false } = {}) {
   if (!contextEnabled || process.platform !== 'win32') return
   const now = Date.now()
-  if (contextRunning) return
+  if (contextRunning) {
+    if (force) contextRefreshPending = true
+    return
+  }
   if (!force && now - lastContextRunAt < CONTEXT_REFRESH_COOLDOWN_MS) return
   contextRunning = true
+  contextRefreshPending = false
   lastContextRunAt = now
   clearTimeout(contextTimer)
 
   contextReader
-    .readTasks({ preferredEndpoint: latestEndpointInfo, now })
+    .readTasks({ preferredEndpoint: latestEndpointInfo, focusedTaskId, pinnedTaskId, now })
     .then(result => {
       contextRunning = false
       if (!contextEnabled) return
@@ -1163,13 +1174,45 @@ function runContextOnce({ force = false } = {}) {
         lastTasksSig = ''
         onChange()
       }
+      if (contextRefreshPending) {
+        contextRefreshPending = false
+        runContextOnce({ force: true })
+        return
+      }
       scheduleNextContext(contextForeground ? CONTEXT_ACTIVE_INTERVAL_MS : CONTEXT_IDLE_INTERVAL_MS)
     })
     .catch(err => {
       contextRunning = false
       log.warn('antigravity task context poll failed:', err?.message || err)
+      if (contextRefreshPending) {
+        contextRefreshPending = false
+        runContextOnce({ force: true })
+        return
+      }
       scheduleNextContext(contextForeground ? CONTEXT_ACTIVE_INTERVAL_MS * 2 : CONTEXT_IDLE_INTERVAL_MS)
     })
+}
+
+function setFocusedTaskId(id) {
+  const next = typeof id === 'string' && id.trim() ? id.trim() : null
+  if (next === focusedTaskId) return
+  focusedTaskId = next
+  if (!contextEnabled || !next) return
+  const existing = latestTasks.find(t => t.cascadeId === next)
+  if (!existing || !existing.hasContext) {
+    runContextOnce({ force: true })
+  }
+}
+
+function setPinnedTaskId(id) {
+  const next = typeof id === 'string' && id.trim() ? id.trim() : null
+  if (next === pinnedTaskId) return
+  pinnedTaskId = next
+  if (!contextEnabled || !next) return
+  const existing = latestTasks.find(t => t.cascadeId === next)
+  if (!existing) {
+    runContextOnce({ force: true })
+  }
 }
 
 function setContextForeground(inFront) {
@@ -1585,6 +1628,8 @@ module.exports = {
   login,
   logout,
   setContextForeground,
+  setFocusedTaskId,
+  setPinnedTaskId,
   refreshTasksNow: () => runContextOnce({ force: true }),
   refreshNow: () => {
     runOnce({ force: true })

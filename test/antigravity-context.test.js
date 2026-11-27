@@ -5,8 +5,12 @@ const {
   resolveModelLabel,
   parseModelCatalog,
   parseTrajectories,
+  parseConversationSummary,
+  parseConversationList,
+  mergeTaskSummaries,
   parseGeneratorMetadataContext,
   parseStepsContext,
+  matchTaskByTitles,
   resolveActiveTask,
   createContextReader,
 } = require('../src/antigravity-context')
@@ -195,25 +199,151 @@ test('parseStepsContext extracts latest planner modelUsage when GM is unavailabl
   assert.strictEqual(ctx.modelLabel, 'Claude Opus 5.5 (High)')
 })
 
-test('resolveActiveTask follows pinned > hook conversation > running main > latest main', () => {
+test('resolveActiveTask follows pinned > UI conversation ID > UI title > hook > running main > latest main', () => {
   const list = [
-    { cascadeId: 'sub-run', isRunning: true, isSubagent: true },
-    { cascadeId: 'main-run', isRunning: true, isSubagent: false },
-    { cascadeId: 'main-idle', isRunning: false, isSubagent: false },
+    { cascadeId: 'sub-run', title: 'Helper', isRunning: true, isSubagent: true },
+    { cascadeId: 'main-run', title: 'Anti-Gravity Context Switching Bug', isRunning: true, isSubagent: false },
+    { cascadeId: 'main-idle', title: 'TranslateTB显示器断开报错修复', isRunning: false, isSubagent: false },
   ]
-  assert.strictEqual(resolveActiveTask(list, { pinnedTaskId: 'main-idle', hookConversationId: 'main-run' }).cascadeId, 'main-idle')
+  assert.strictEqual(
+    resolveActiveTask(list, { pinnedTaskId: 'main-idle', uiConversationId: 'main-run', hookConversationId: 'main-run' }).cascadeId,
+    'main-idle',
+  )
+  // Switching to an idle conversation in UI overrides a running conversation and hook state.
+  assert.strictEqual(
+    resolveActiveTask(list, { uiConversationId: 'main-idle', hookConversationId: 'main-run' }).cascadeId,
+    'main-idle',
+  )
+  // Switching to an unloaded conversation ID does not fall back to a stale conversation.
+  assert.strictEqual(resolveActiveTask(list, { uiConversationId: 'not-loaded-yet', hookConversationId: 'main-run' }), null)
+  // Title fallback matches exact or truncated titles when Document URL has no UUID.
+  assert.strictEqual(
+    resolveActiveTask(list, { uiConversationTitles: ['TranslateTB显示器断开报错修复'], hookConversationId: 'main-run' }).cascadeId,
+    'main-idle',
+  )
+  assert.strictEqual(
+    resolveActiveTask(list, { uiConversationTitles: ['Anti-Gravity Context Swit…'] }).cascadeId,
+    'main-run',
+  )
   assert.strictEqual(resolveActiveTask(list, { hookConversationId: 'main-idle' }).cascadeId, 'main-idle')
   assert.strictEqual(resolveActiveTask(list, {}).cascadeId, 'main-run')
   assert.strictEqual(
     resolveActiveTask(
       [
-        { cascadeId: 'sub-run', isRunning: true, isSubagent: true },
-        { cascadeId: 'main-idle', isRunning: false, isSubagent: false },
+        { cascadeId: 'sub-run', title: 'Helper', isRunning: true, isSubagent: true },
+        { cascadeId: 'main-idle', title: 'Idle', isRunning: false, isSubagent: false },
       ],
       {},
     ).cascadeId,
     'main-idle',
   )
+})
+
+test('parseConversationList and mergeTaskSummaries merge historical chats without overwriting trajectory metadata', () => {
+  const trajectories = parseTrajectories({
+    trajectorySummaries: {
+      c1: {
+        summary: 'Current chat',
+        stepCount: 25,
+        status: 'CASCADE_RUN_STATUS_RUNNING',
+        lastModifiedTime: '2026-11-27T08:00:00Z',
+        workspaces: [{ workspaceFolderAbsoluteUri: 'file:///c%3A/Claude%20Whale/' }],
+      },
+    },
+  })
+  const convs = parseConversationList({
+    conversations: [
+      {
+        id: 'c1',
+        annotations: { title: 'Current chat' },
+        state: { runState: 'RUN_STATE_RUNNING', updateTime: '2026-11-27T08:00:00Z' },
+      },
+      {
+        id: 'c2',
+        annotations: { title: 'Older chat' },
+        state: { runState: 'RUN_STATE_IDLE', updateTime: '2026-11-27T06:00:00Z' },
+      },
+      {
+        id: 'c-archived',
+        annotations: { title: 'Archived chat', archived: true },
+        state: { runState: 'RUN_STATE_IDLE', updateTime: '2026-11-27T07:00:00Z' },
+      },
+    ],
+  })
+  assert.strictEqual(convs.length, 2)
+  const merged = mergeTaskSummaries(trajectories, convs)
+  assert.deepStrictEqual(
+    merged.map(t => t.cascadeId),
+    ['c1', 'c2'],
+  )
+  assert.strictEqual(merged[0].stepCount, 25)
+  assert.strictEqual(merged[0].workspace, 'Claude Whale')
+  assert.strictEqual(merged[1].title, 'Older chat')
+})
+
+test('matchTaskByTitles ignores untitled tasks and very short ambiguous fragments', () => {
+  const list = [
+    { cascadeId: 'a', title: '未命名任务 (aaaaaaaa)', isUntitled: true, isSubagent: false },
+    { cascadeId: 'b', title: 'Windhawk And QTTabBar Conflict', isUntitled: false, isSubagent: false },
+  ]
+  assert.strictEqual(matchTaskByTitles(list, ['Wind']), null)
+  assert.strictEqual(matchTaskByTitles(list, ['未命名任务 (aaaaaaaa)']), null)
+  assert.strictEqual(matchTaskByTitles(list, ['windhawk and qttabbar conflict']).cascadeId, 'b')
+  assert.strictEqual(matchTaskByTitles(list, ['Windhawk And QTTab...']).cascadeId, 'b')
+})
+
+test('createContextReader loads focused historical conversation via GetConversation even outside trajectories', async () => {
+  const reader = createContextReader({
+    discoverServers: async () => [{ pid: 1, token: 'tok', ports: [5000] }],
+    requestJson: async ({ rpcPath, body }) => {
+      const parsed = JSON.parse(body || '{}')
+      if (rpcPath.endsWith('/GetAllCascadeTrajectories')) {
+        return {
+          trajectorySummaries: {
+            t1: {
+              summary: 'Recent chat',
+              stepCount: 10,
+              status: 'CASCADE_RUN_STATUS_IDLE',
+              lastModifiedTime: '2026-11-27T08:00:00Z',
+            },
+          },
+        }
+      }
+      if (rpcPath.endsWith('/ListConversations')) {
+        return { conversations: [] }
+      }
+      if (rpcPath.endsWith('/GetConversation') && parsed.conversationId === 'old-hist-id') {
+        return {
+          id: 'old-hist-id',
+          annotations: { title: 'Historical Chat' },
+          state: { runState: 'RUN_STATE_IDLE', updateTime: '2026-11-20T05:00:00Z' },
+        }
+      }
+      if (rpcPath.endsWith('/GetCascadeTrajectoryGeneratorMetadata')) {
+        const tokens = parsed.cascadeId === 'old-hist-id' ? '128000' : '25600'
+        return {
+          generatorMetadata: [
+            {
+              chatModel: {
+                model: 'MODEL_PLACEHOLDER_M532',
+                usage: { model: 'MODEL_PLACEHOLDER_M532', inputTokens: tokens, outputTokens: '0' },
+                chatStartMetadata: { contextWindowMetadata: { maxContextTokens: 512000 } },
+              },
+            },
+          ],
+        }
+      }
+      return null
+    },
+  })
+
+  const res = await reader.readTasks({ focusedTaskId: 'old-hist-id', now: 1000 })
+  assert.strictEqual(res.ok, true)
+  const hist = res.tasks.find(t => t.cascadeId === 'old-hist-id')
+  assert.ok(hist)
+  assert.strictEqual(hist.title, 'Historical Chat')
+  assert.strictEqual(hist.usagePercent, 25)
+  assert.strictEqual(parseConversationSummary({ id: 'x', state: { summary: 'Fallback summary' } }).title, 'Fallback summary')
 })
 
 test('createContextReader caches unchanged tasks by stepCount+mtime and falls back to steps RPC', async () => {
