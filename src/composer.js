@@ -1,10 +1,12 @@
 // Finds the input box (the composer) in the Claude or Antigravity window, so the character can sit
-// on top of it, and for Antigravity also reads the active model label near the composer.
+// on top of it, and for Antigravity also reads the active model label near the composer and the
+// currently viewed conversation (from Document URL /c/<uuid> or header title fallback).
 //
 // Electron windows expose their page through Windows UI Automation. A hidden PowerShell process
 // reads it: the widget writes a request line:
 //   "<hwnd> <box 0|1> <dismiss 0|1> <host claude|antigravity> <model 0|1>"
-// and it answers with JSON on a line: {"x","y","w","h","wx","wy","ww","wh","model","dismissed"},
+// and it answers with JSON on a line:
+//   {"x","y","w","h","wx","wy","ww","wh","model","conversationId","conversationTitles","dismissed"},
 // {}, or {"error"}. The reader asks to be per-monitor DPI aware, and fitToWindow corrects scaled
 // coordinates using the window's reported rectangle ("wx","wy","ww","wh") against the real one.
 //
@@ -12,8 +14,10 @@
 // panes are side by side). The same process also closes Claude's "approaching your weekly limit"
 // banner above the input box when weekly use is above BANNER_FROM.
 //
-// For Antigravity, it locates the chat composer editor and its rounded wrapper, and inspects
-// nearby buttons/comboboxes for the selected model name (e.g. "Gemini 4 Neon (High)", "Claude Sonnet 4.6").
+// For Antigravity, it locates the chat composer editor and its rounded wrapper, inspects nearby
+// buttons/comboboxes for the selected model name (e.g. "Gemini 4 Neon (High)", "Claude Sonnet 4.6"),
+// and reads the active conversation ID from the enclosing Chromium Document's URL (or falls back to
+// visible header/selected title candidates).
 
 const { spawn } = require('child_process')
 const log = require('./log')
@@ -55,9 +59,55 @@ function extractModelLabel(text) {
   return match ? match[0].trim() : clean
 }
 
+const UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const CONV_URL_PATH_RE = new RegExp(`/(?:c|conversations?|chats?|tasks?|cascade)/(${UUID_RE})(?:[/?#]|$)`, 'i')
+const CONV_URL_PARAM_RE = new RegExp(`[?&#](?:cascadeId|conversationId|chatId|taskId)=(${UUID_RE})(?:[&#]|$)`, 'i')
+const CONV_UUID_ONLY_RE = new RegExp(`^${UUID_RE}$`, 'i')
+const GENERIC_CONV_TITLE_RE =
+  /^(?:antigravity|new conversation|new chat|untitled|新建对话|新对话|使用情况|usage|settings|设置|search|搜索)$/i
+
+// Extracts a conversation/cascade UUID from a raw UUID or Antigravity Hub URL
+// (e.g. "https://127.0.0.1:64839/c/<uuid>?project=...").
+function extractConversationId(text) {
+  if (typeof text !== 'string') return null
+  const clean = text.trim()
+  if (!clean) return null
+  if (CONV_UUID_ONLY_RE.test(clean)) return clean.toLowerCase()
+  const pathMatch = clean.match(CONV_URL_PATH_RE)
+  if (pathMatch) return pathMatch[1].toLowerCase()
+  const paramMatch = clean.match(CONV_URL_PARAM_RE)
+  if (paramMatch) return paramMatch[1].toLowerCase()
+  return null
+}
+
+function cleanConversationTitle(text) {
+  if (typeof text !== 'string') return null
+  const cleaned = text
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\s*[-–—|·]\s*Antigravity\s*$/i, '')
+    .trim()
+  if (cleaned.length < 2 || cleaned.length > 120) return null
+  if (GENERIC_CONV_TITLE_RE.test(cleaned)) return null
+  return cleaned
+}
+
+function normalizeConversationTitles(raw) {
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []
+  const out = []
+  for (const item of list) {
+    const clean = cleanConversationTitle(item)
+    if (clean && !out.includes(clean)) out.push(clean)
+    if (out.length >= 8) break
+  }
+  return out
+}
+
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 # Real pixels even after the display scale changes; otherwise Windows scales what UI Automation reports
 try {
   Add-Type -Namespace Whale -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr c); [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);'
@@ -75,15 +125,25 @@ $modelCond = New-Object System.Windows.Automation.OrCondition(
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::ComboBox)),
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem)))
 $modelTextCond = New-Object System.Windows.Automation.OrCondition($modelCond, $textCond)
+$convTitleCond = New-Object System.Windows.Automation.OrCondition(
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text)),
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)),
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::TreeItem)),
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)),
+  (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Hyperlink)))
 $box = $null
 $boxHwnd = 0
 $boxHost = ''
+$modelHwnd = 0
 $searched = [DateTime]::MinValue
 $modelSearched = [DateTime]::MinValue
 $usageSearched = [DateTime]::MinValue
 $cachedModel = $null
+$cachedConv = $null
 $script:debuggedHwnd = 0
 $script:modelDebuggedHwnd = 0
+$script:convDebuggedHwnd = 0
 $script:lastDebug = $null
 $closeCond = New-Object System.Windows.Automation.AndCondition(
   (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
@@ -362,6 +422,131 @@ function Find-AntigravityUsageTexts($hwnd) {
   return @($items | Sort-Object Key | ForEach-Object { $_.Text })
 }
 
+function Get-ElementValue($el) {
+  if (-not $el) { return $null }
+  try {
+    $pat = $null
+    if ($el.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pat) -and $pat) {
+      return [string]$pat.Current.Value
+    }
+  } catch {}
+  return $null
+}
+
+function Match-ConversationId($url) {
+  if (-not $url) { return $null }
+  $s = [string]$url
+  if ($s -match '(?i)/(?:c|conversations?|chats?|tasks?|cascade)/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[/?#]|$)') {
+    return $matches[1].ToLowerInvariant()
+  }
+  if ($s -match '(?i)[?&#](?:cascadeId|conversationId|chatId|taskId)=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[&#]|$)') {
+    return $matches[1].ToLowerInvariant()
+  }
+  return $null
+}
+
+function Clean-ConversationTitle($text) {
+  if (-not $text) { return $null }
+  $t = ([string]$text) -replace '[\r\n\t]+', ' '
+  $t = ($t -replace '\s+', ' ').Trim()
+  $t = ($t -replace '\s*[-–—|·]\s*Antigravity\s*$', '').Trim()
+  if ($t.Length -lt 2 -or $t.Length -gt 120) { return $null }
+  if ($t -match '^(?i)(antigravity|new conversation|new chat|untitled|新建对话|新对话|使用情况|usage|settings|设置|search|搜索)$') { return $null }
+  return $t
+}
+
+function Add-TitleCandidate($list, $raw) {
+  if ($list.Count -ge 8) { return }
+  $clean = Clean-ConversationTitle $raw
+  if ($clean -and -not $list.Contains($clean)) { [void]$list.Add($clean) }
+}
+
+function Find-AntigravityConversation($hwnd, $boxEl) {
+  $root = $AE::FromHandle([IntPtr]$hwnd)
+  $rootRect = $root.Current.BoundingRectangle
+  $titles = New-Object 'System.Collections.Generic.List[string]'
+
+  # 1. Fast path: climb from the active composer box to its enclosing Document and read its URL.
+  if ($boxEl) {
+    $cur = $boxEl
+    for ($i = 0; $i -lt 24; $i++) {
+      $cur = $walker.GetParent($cur)
+      if (-not $cur) { break }
+      if ($cur.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document) {
+        $url = Get-ElementValue $cur
+        $hit = Match-ConversationId $url
+        if ($hit) { return @{ id = $hit; titles = @() } }
+        Add-TitleCandidate $titles $cur.Current.Name
+        break
+      }
+    }
+  }
+
+  # 2. Scan all Document nodes (prefer visible largest Document whose URL carries /c/<uuid>).
+  $bestDocId = $null
+  $bestDocArea = -1
+  $docDiag = @()
+  foreach ($doc in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $docCond)) {
+    $c = $doc.Current
+    $r = $c.BoundingRectangle
+    $url = Get-ElementValue $doc
+    $hit = Match-ConversationId $url
+    $area = if (-not $r.IsEmpty) { [double]($r.Width * $r.Height) } else { 0 }
+    if (-not $c.IsOffscreen) { $area += 1e9 }
+    if ($hit -and $area -gt $bestDocArea) {
+      $bestDocArea = $area
+      $bestDocId = $hit
+    }
+    if (-not $c.IsOffscreen) { Add-TitleCandidate $titles $c.Name }
+    if ($docDiag.Count -lt 4) {
+      $safeUrl = if ($url) { ($url -replace '[#?].*$', '') } else { '' }
+      $dn = ([string]$c.Name) -replace '[\r\n]+', ' '
+      if ($dn.Length -gt 32) { $dn = $dn.Substring(0, 32) }
+      $docDiag += "doc($safeUrl|$dn|$([int]$r.Width)x$([int]$r.Height))"
+    }
+  }
+  if ($bestDocId) { return @{ id = $bestDocId; titles = @() } }
+
+  # 3. Fallback when URL has no UUID: window title + selected sidebar item + top header bar texts.
+  Add-TitleCandidate $titles $root.Current.Name
+  if (-not $rootRect.IsEmpty) {
+    $headerBottom = $rootRect.Top + [Math]::Min(120, $rootRect.Height * 0.16)
+    $headerLeft = if ($boxEl -and -not $boxEl.Current.BoundingRectangle.IsEmpty) { $boxEl.Current.BoundingRectangle.Left - 120 } else { $rootRect.Left + 160 }
+    $headerItems = @()
+    foreach ($el in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $convTitleCond)) {
+      $c = $el.Current
+      $r = $c.BoundingRectangle
+      if ($c.IsOffscreen -or $r.IsEmpty) { continue }
+      $isSel = $false
+      try {
+        $sp = $null
+        if ($el.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$sp) -and $sp -and $sp.Current.IsSelected) {
+          $isSel = $true
+        }
+      } catch {}
+      if ($isSel) {
+        Add-TitleCandidate $titles $c.Name
+        continue
+      }
+      if ($r.Top -lt $headerBottom -and $r.Left -ge $headerLeft -and $r.Height -le 56 -and $r.Width -ge 36) {
+        $clean = Clean-ConversationTitle $c.Name
+        if ($clean) {
+          $headerItems += [PSCustomObject]@{ Left = [int]$r.Left; Top = [int]$r.Top; Text = $clean }
+        }
+      }
+    }
+    foreach ($item in ($headerItems | Sort-Object Top, Left | Select-Object -First 6)) {
+      Add-TitleCandidate $titles $item.Text
+    }
+  }
+
+  if ($hwnd -ne $script:convDebuggedHwnd) {
+    $script:convDebuggedHwnd = $hwnd
+    $script:lastDebug = "conv-fallback docs=[" + ($docDiag -join '; ') + "] titles=[" + (($titles.ToArray()) -join ' | ') + ']'
+  }
+  return @{ id = $null; titles = @($titles.ToArray()) }
+}
+
 while ($null -ne ($line = [Console]::In.ReadLine())) {
   $out = '{}'
   try {
@@ -399,21 +584,32 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       }
     }
     if ($wantModel -and $hostType -eq 'antigravity') {
+      $switchedHwnd = $hwnd -ne $modelHwnd
       $mAge = ([DateTime]::UtcNow - $modelSearched).TotalSeconds
-      if ($hwnd -ne $boxHwnd -or $mAge -ge 0.3) {
+      if ($switchedHwnd -or $mAge -ge 0.3) {
         $modelSearched = [DateTime]::UtcNow
+        $modelHwnd = $hwnd
         $cachedModel = Find-AntigravityModel $hwnd $box
+        $cachedConv = Find-AntigravityConversation $hwnd $box
       }
       $uAge = ([DateTime]::UtcNow - $usageSearched).TotalSeconds
-      if ($hwnd -ne $boxHwnd -or $uAge -ge 2.0) {
+      if ($switchedHwnd -or $uAge -ge 2.0) {
         $usageSearched = [DateTime]::UtcNow
         $usageTexts = Find-AntigravityUsageTexts $hwnd
         if ($usageTexts) {
-          $fields += '"usageTexts":' + (ConvertTo-Json $usageTexts -Compress)
+          $fields += '"usageTexts":' + (ConvertTo-Json -InputObject @($usageTexts) -Compress)
         }
       }
       if ($cachedModel) {
         $fields += '"model":' + (ConvertTo-Json ([string]$cachedModel) -Compress)
+      }
+      if ($cachedConv) {
+        if ($cachedConv.id) {
+          $fields += '"conversationId":' + (ConvertTo-Json ([string]$cachedConv.id) -Compress)
+        }
+        if ($cachedConv.titles -and $cachedConv.titles.Count -gt 0) {
+          $fields += '"conversationTitles":' + (ConvertTo-Json -InputObject @($cachedConv.titles) -Compress)
+        }
       }
     }
     if ($script:lastDebug) {
@@ -424,6 +620,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
   } catch {
     $box = $null
     $cachedModel = $null
+    $cachedConv = $null
     $out = '{"error":' + (ConvertTo-Json ([string]$_.Exception.Message) -Compress) + '}'
   }
   [Console]::Out.WriteLine($out)
@@ -521,7 +718,10 @@ function answer(line) {
     : null
   const model = typeof value.model === 'string' && value.model.trim() ? extractModelLabel(value.model) : null
   const usageTexts = Array.isArray(value.usageTexts) && value.usageTexts.length > 0 ? value.usageTexts : null
-  latest = { hwnd, host, rect, frame, model, usageTexts, at: Date.now() }
+  const conversationId =
+    typeof value.conversationId === 'string' && value.conversationId.trim() ? extractConversationId(value.conversationId) : null
+  const conversationTitles = normalizeConversationTitles(value.conversationTitles)
+  latest = { hwnd, host, rect, frame, model, usageTexts, conversationId, conversationTitles, at: Date.now() }
 }
 
 // Asks for the box of the window `hwnd` (with box) at most every POLL_MS, closes Claude's weekly
@@ -589,6 +789,15 @@ function usageTextsOf(hwnd) {
   return latest.usageTexts
 }
 
+// Active conversation signal read from Antigravity's UIA Document URL or header title candidates.
+function conversationOf(hwnd) {
+  if (!latest || latest.hwnd !== hwnd || latest.host !== 'antigravity') return null
+  return {
+    id: latest.conversationId || null,
+    titles: Array.isArray(latest.conversationTitles) ? latest.conversationTitles : [],
+  }
+}
+
 function stop() {
   if (child) child.kill()
   child = null
@@ -596,4 +805,18 @@ function stop() {
   latest = null
 }
 
-module.exports = { poll, boxOf, modelOf, usageTextsOf, stop, isLimitBanner, isModelLabel, extractModelLabel, bannerDue, fitToWindow }
+module.exports = {
+  poll,
+  boxOf,
+  modelOf,
+  usageTextsOf,
+  conversationOf,
+  stop,
+  isLimitBanner,
+  isModelLabel,
+  extractModelLabel,
+  extractConversationId,
+  normalizeConversationTitles,
+  bannerDue,
+  fitToWindow,
+}

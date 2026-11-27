@@ -100,6 +100,8 @@ let updateProgress = null // text while an update downloads
 let weeklyPercent = null // Claude's highest weekly window's use, from the last usage read, or null
 let lastUiModel = null // latest model name read from Antigravity via UI Automation
 let lastUiModelAt = 0 // timestamp when lastUiModel was observed
+let lastUiConversationId = null // latest conversation UUID read from Antigravity via UI Automation
+let lastUiConversationTitles = [] // fallback title candidates when Document URL has no UUID
 let lastUiUsageSignature = null // latest "使用情况" panel snapshot read via UI Automation
 let lastAntigravityPayload = null // latest renderer payload for Antigravity (for menu chips)
 
@@ -223,6 +225,9 @@ function tick() {
     targetSeen = seen
     lastUiModel = null
     lastUiModelAt = 0
+    lastUiConversationId = null
+    lastUiConversationTitles = []
+    antigravity.setFocusedTaskId(null)
   }
   if (!state.window || state.minimized) {
     antigravity.setContextForeground(false)
@@ -257,6 +262,21 @@ function tick() {
       lastUiModel = uiModel
       lastUiModelAt = Date.now()
       sendUsage()
+    }
+    const uiConv = composer.conversationOf(state.window.hwnd)
+    if (uiConv) {
+      const nextId = uiConv.id || null
+      const nextTitles = Array.isArray(uiConv.titles) ? uiConv.titles : []
+      const idChanged = nextId !== lastUiConversationId
+      const titlesChanged = nextTitles.join('|') !== lastUiConversationTitles.join('|')
+      if (idChanged || titlesChanged) {
+        if (idChanged) log.info('antigravity ui conversation:', nextId || '(none)')
+        else if (!nextId && nextTitles.length > 0) log.info('antigravity ui conversation titles:', nextTitles.slice(0, 3).join(' | '))
+        lastUiConversationId = nextId
+        lastUiConversationTitles = nextTitles
+        antigravity.setFocusedTaskId(nextId)
+        sendUsage()
+      }
     }
     const uiTexts = composer.usageTextsOf(state.window.hwnd)
     if (uiTexts) {
@@ -346,6 +366,8 @@ function readAntigravityUsage() {
     tasks: taskSnapshot.tasks,
     tasksUpdatedAt: taskSnapshot.updatedAt,
     pinnedTaskId: settings.antigravityPinnedTaskId || null,
+    uiConversationId: lastUiConversationId,
+    uiConversationTitles: lastUiConversationTitles,
     hookConversationId: hookState?.conversationId || null,
     contextEnabled: settings.antigravityContextEnabled !== false,
   })
@@ -482,6 +504,7 @@ function setAntigravityGroup(groupId) {
 
 function setAntigravityTask(cascadeId) {
   setSetting('antigravityPinnedTaskId', cascadeId || null)
+  antigravity.setPinnedTaskId(settings.antigravityPinnedTaskId || null)
   sendUsage()
 }
 
@@ -1001,6 +1024,7 @@ if (finishing) {
     webusage.start(() => {
       if (activeHost === 'claude') sendUsage()
     })
+    antigravity.setPinnedTaskId(settings.antigravityPinnedTaskId || null)
     antigravity.start(
       () => {
         if (activeHost === 'antigravity') sendUsage()

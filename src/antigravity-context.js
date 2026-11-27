@@ -10,6 +10,8 @@ const GENERATOR_METADATA_PATH = '/exa.language_server_pb.LanguageServerService/G
 const TRAJECTORY_STEPS_PATH = '/exa.language_server_pb.LanguageServerService/GetCascadeTrajectorySteps'
 const USER_STATUS_PATH = '/exa.language_server_pb.LanguageServerService/GetUserStatus'
 const AVAILABLE_MODELS_PATH = '/exa.language_server_pb.LanguageServerService/GetAvailableModels'
+const LIST_CONVERSATIONS_PATH = '/product.v1.ConversationService/ListConversations'
+const GET_CONVERSATION_PATH = '/product.v1.ConversationService/GetConversation'
 
 const RPC_METADATA = { ideName: 'antigravity', extensionName: 'antigravity' }
 const CONTEXT_RPC_TIMEOUT_MS = 5000
@@ -304,6 +306,79 @@ function parseTrajectories(raw) {
   return tasks
 }
 
+// Parses a single ConversationService Conversation object into the same summary shape as parseTrajectories.
+function parseConversationSummary(raw) {
+  const conv = raw?.conversation && typeof raw.conversation === 'object' ? raw.conversation : raw
+  if (!conv || typeof conv !== 'object') return null
+  const cascadeId = typeof conv.id === 'string' ? conv.id.trim() : ''
+  if (!cascadeId) return null
+  if (conv.annotations?.archived === true) return null
+
+  const rawTitle = conv.annotations?.title || conv.state?.summary || ''
+  const { title, isUntitled } = formatTaskTitle(cascadeId, rawTitle)
+  const status = typeof conv.state?.runState === 'string' ? conv.state.runState : ''
+  const isRunning = /RUNNING|EXECUTING|IN_PROGRESS/i.test(status)
+  const isWaiting = /WAITING/i.test(status)
+  const lastModifiedTime =
+    (typeof conv.state?.updateTime === 'string' && conv.state.updateTime) ||
+    (typeof conv.metadata?.createTime === 'string' && conv.metadata.createTime) ||
+    ''
+  const parsedTime = lastModifiedTime ? Date.parse(lastModifiedTime) : 0
+  const lastModifiedMs = Number.isFinite(parsedTime) ? parsedTime : 0
+  const parentId = typeof conv.metadata?.parentConversationId === 'string' ? conv.metadata.parentConversationId.trim() : ''
+
+  return {
+    cascadeId,
+    title,
+    isUntitled,
+    status,
+    isRunning,
+    isWaiting,
+    isSubagent: Boolean(parentId),
+    stepCount: 0,
+    lastModifiedTime,
+    lastModifiedMs,
+    model: '',
+    workspace: '',
+  }
+}
+
+function parseConversationList(raw) {
+  const body = raw?.response && typeof raw.response === 'object' ? raw.response : raw
+  const list = Array.isArray(body?.conversations) ? body.conversations : []
+  const out = []
+  for (const item of list) {
+    const parsed = parseConversationSummary(item)
+    if (parsed) out.push(parsed)
+  }
+  return out
+}
+
+// Merges trajectory summaries (richer metadata for in-memory tasks) with ConversationService entries
+// (which also include historical conversations not yet loaded into GetAllCascadeTrajectories).
+function mergeTaskSummaries(trajectoryTasks, conversationTasks) {
+  const byId = new Map()
+  for (const task of trajectoryTasks || []) {
+    if (task && task.cascadeId) byId.set(task.cascadeId, task)
+  }
+  for (const conv of conversationTasks || []) {
+    if (!conv || !conv.cascadeId) continue
+    const existing = byId.get(conv.cascadeId)
+    if (!existing) {
+      byId.set(conv.cascadeId, conv)
+    } else if (existing.isUntitled && !conv.isUntitled) {
+      byId.set(conv.cascadeId, { ...existing, title: conv.title, isUntitled: false })
+    }
+  }
+  const merged = [...byId.values()]
+  merged.sort((a, b) => {
+    if (a.isRunning !== b.isRunning) return a.isRunning ? -1 : 1
+    if (b.lastModifiedMs !== a.lastModifiedMs) return b.lastModifiedMs - a.lastModifiedMs
+    return a.cascadeId.localeCompare(b.cascadeId)
+  })
+  return merged
+}
+
 function extractUsageNumbers(usage) {
   if (!usage || typeof usage !== 'object') return null
   const inputTokens = parseInt0(usage.inputTokens)
@@ -452,12 +527,76 @@ function parseStepsContext(raw, fallbackModel = '', modelNames = {}) {
   }
 }
 
+function normalizeTitleForMatch(text) {
+  if (typeof text !== 'string') return ''
+  return text
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/(?:\u2026|\.{3})+$/, '')
+    .trim()
+    .toLowerCase()
+}
+
+// Matches UIA-observed window/header/selected title candidates against known tasks.
+// Exact title matches win first; truncated prefix matches require at least 6 characters.
+function matchTaskByTitles(tasks, titles) {
+  if (!Array.isArray(tasks) || tasks.length === 0 || !Array.isArray(titles) || titles.length === 0) return null
+  const normalizedCandidates = titles.map(normalizeTitleForMatch).filter(t => t.length >= 2)
+  if (normalizedCandidates.length === 0) return null
+
+  const namedTasks = tasks
+    .filter(t => t && !t.isUntitled && typeof t.title === 'string')
+    .map(t => ({ task: t, norm: normalizeTitleForMatch(t.title) }))
+    .filter(item => item.norm.length >= 2)
+
+  for (const cand of normalizedCandidates) {
+    const exactMain = namedTasks.find(item => !item.task.isSubagent && item.norm === cand)
+    if (exactMain) return exactMain.task
+    const exactAny = namedTasks.find(item => item.norm === cand)
+    if (exactAny) return exactAny.task
+  }
+
+  for (const cand of normalizedCandidates) {
+    if (cand.length < 6) continue
+    let best = null
+    let bestScore = 0
+    for (const item of namedTasks) {
+      const shorter = Math.min(cand.length, item.norm.length)
+      if (shorter < 6) continue
+      if (item.norm.startsWith(cand) || cand.startsWith(item.norm)) {
+        const score = shorter + (item.task.isSubagent ? 0 : 1000)
+        if (score > bestScore) {
+          bestScore = score
+          best = item.task
+        }
+      }
+    }
+    if (best) return best
+  }
+
+  return null
+}
+
 // Selects which task should be highlighted and shown in the pet's Ctx badge.
-function resolveActiveTask(tasks, { pinnedTaskId = null, hookConversationId = null } = {}) {
+function resolveActiveTask(
+  tasks,
+  { pinnedTaskId = null, uiConversationId = null, uiConversationTitles = null, hookConversationId = null } = {},
+) {
   if (!Array.isArray(tasks) || tasks.length === 0) return null
   if (pinnedTaskId) {
     const pinned = tasks.find(t => t.cascadeId === pinnedTaskId)
     if (pinned) return pinned
+  }
+  if (uiConversationId) {
+    const focused = tasks.find(t => t.cascadeId === uiConversationId)
+    if (focused) return focused
+    // The user switched to a specific conversation whose context has not loaded yet; avoid showing a stale task.
+    return null
+  }
+  if (Array.isArray(uiConversationTitles) && uiConversationTitles.length > 0) {
+    const byTitle = matchTaskByTitles(tasks, uiConversationTitles)
+    if (byTitle) return byTitle
   }
   if (hookConversationId) {
     const hooked = tasks.find(t => t.cascadeId === hookConversationId)
@@ -573,12 +712,19 @@ function createContextReader({ discoverServers, requestJson, log } = {}) {
   }
 
   async function fetchTaskContext(ep, task) {
-    const sig = `${task.stepCount}:${task.lastModifiedTime}`
-    const cached = taskCache.get(task.cascadeId)
-    if (cached && cached.sig === sig && cached.context) {
-      return {
-        ...cached.context,
-        modelLabel: resolveModelLabel(cached.context.model, modelNames),
+    const sig =
+      task.stepCount > 0
+        ? `${task.stepCount}:${task.lastModifiedTime}`
+        : task.lastModifiedTime
+          ? `conv:${task.lastModifiedTime}`
+          : ''
+    if (sig) {
+      const cached = taskCache.get(task.cascadeId)
+      if (cached && cached.sig === sig && cached.context) {
+        return {
+          ...cached.context,
+          modelLabel: resolveModelLabel(cached.context.model, modelNames),
+        }
       }
     }
 
@@ -599,22 +745,77 @@ function createContextReader({ discoverServers, requestJson, log } = {}) {
       ctx = stepsRaw ? parseStepsContext(stepsRaw, task.model, modelNames) : null
     }
 
-    if (ctx) {
+    if (ctx && sig) {
       setCachedTask(task.cascadeId, { sig, context: ctx })
     }
     return ctx
   }
 
-  async function readTasks({ preferredEndpoint = null, now = Date.now() } = {}) {
+  async function fetchConversationTask(ep, conversationId) {
+    const convRaw = await callEndpoint(
+      ep,
+      GET_CONVERSATION_PATH,
+      { conversationId },
+      { timeoutMs: 2500, maxBytes: 1024 * 1024 },
+    )
+    const parsed = convRaw ? parseConversationSummary(convRaw) : null
+    if (parsed) return parsed
+    const { title, isUntitled } = formatTaskTitle(conversationId, '')
+    return {
+      cascadeId: conversationId,
+      title,
+      isUntitled,
+      status: '',
+      isRunning: false,
+      isWaiting: false,
+      isSubagent: false,
+      stepCount: 0,
+      lastModifiedTime: '',
+      lastModifiedMs: 0,
+      model: '',
+      workspace: '',
+    }
+  }
+
+  async function readTasks({ preferredEndpoint = null, focusedTaskId = null, pinnedTaskId = null, now = Date.now() } = {}) {
     const probed = await probeTrajectories(preferredEndpoint)
     if (!probed) return { ok: false, tasks: [] }
 
     const { endpoint, raw } = probed
     await refreshModelCatalog(endpoint, now)
 
-    const allTasks = parseTrajectories(raw)
+    const trajectoryTasks = parseTrajectories(raw)
+    const mainTrajectoryCount = trajectoryTasks.filter(t => !t.isSubagent).length
+    const priorityIds = [...new Set([focusedTaskId, pinnedTaskId].filter(id => typeof id === 'string' && id.trim()).map(id => id.trim()))]
+    const needConvList =
+      mainTrajectoryCount < MAX_TASKS || priorityIds.some(id => !trajectoryTasks.some(t => t.cascadeId === id))
+
+    let allTasks = trajectoryTasks
+    if (needConvList) {
+      const convRaw = await callEndpoint(
+        endpoint,
+        LIST_CONVERSATIONS_PATH,
+        { pageSize: MAX_TASKS, includeArchived: false, parentConversationId: '' },
+        { timeoutMs: 2500, maxBytes: 2 * 1024 * 1024 },
+      )
+      const convTasks = convRaw ? parseConversationList(convRaw) : []
+      if (convTasks.length > 0) allTasks = mergeTaskSummaries(trajectoryTasks, convTasks)
+    }
+
     // Keep main tasks + any currently running subagents; drop idle/historical subagents to stay focused.
     const visible = allTasks.filter(t => !t.isSubagent || t.isRunning).slice(0, MAX_TASKS)
+
+    // Always include the currently viewed (focused) or pinned conversation even if it is an older historical chat.
+    for (const id of priorityIds) {
+      if (visible.some(t => t.cascadeId === id)) continue
+      const fromAll = allTasks.find(t => t.cascadeId === id)
+      if (fromAll) {
+        visible.push(fromAll)
+      } else {
+        const fetched = await fetchConversationTask(endpoint, id)
+        if (fetched) visible.push(fetched)
+      }
+    }
 
     const enriched = new Array(visible.length)
     for (let i = 0; i < visible.length; i += FETCH_CONCURRENCY) {
@@ -681,8 +882,12 @@ module.exports = {
   resolveModelLabel,
   parseModelCatalog,
   parseTrajectories,
+  parseConversationSummary,
+  parseConversationList,
+  mergeTaskSummaries,
   parseGeneratorMetadataContext,
   parseStepsContext,
+  matchTaskByTitles,
   resolveActiveTask,
   createContextReader,
 }
